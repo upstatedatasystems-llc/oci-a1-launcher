@@ -53,52 +53,49 @@ class StackSpec:
     memory_gb: float
 
 
-STACKS: tuple[StackSpec, ...] = (
-    StackSpec(
-        "purgatory02-ad1",
-        "ocid1.ormstack.oc1.iad.amaaaaaa5gdmbsaaxhcnhb3egyphv4xkr3kcmlughtnio5vcubgsqllnaisq",
-        1,
-        2,
-        12,
-    ),
-    StackSpec(
-        "purgatory02-ad1e",
-        "ocid1.ormstack.oc1.iad.amaaaaaa5gdmbsaagusww37uvku5n32n5t6ypcel727f5bwsl37zr6qbhrpq",
-        1,
-        1,
-        6,
-    ),
-    StackSpec(
-        "purgatory02-ad2",
-        "ocid1.ormstack.oc1.iad.amaaaaaa5gdmbsaag34ogwafrkcp7bj675vxsh333o4q3weyw6kibvhfuquq",
-        2,
-        2,
-        12,
-    ),
-    StackSpec(
-        "purgatory02-ad2e",
-        "ocid1.ormstack.oc1.iad.amaaaaaa5gdmbsaabdgmlwuql7yem2axve4rzfbg3em7fecyhpox7tjbmroa",
-        2,
-        1,
-        6,
-    ),
-    StackSpec(
-        "purgatory02-ad3",
-        "ocid1.ormstack.oc1.iad.amaaaaaa5gdmbsaaavipqidc6by6yf4owczhl5bxdlljdvjdzd7ikd4rnlta",
-        3,
-        2,
-        12,
-    ),
-    StackSpec(
-        "purgatory02-ad3e",
-        "ocid1.ormstack.oc1.iad.amaaaaaa5gdmbsaalp2rajyorphv4oag5h5pd4sz5tygpvtuoerhrnha7kuq",
-        3,
-        1,
-        6,
-    ),
+DEFAULT_STACK_METADATA: tuple[dict[str, Any], ...] = (
+    {"name": "purgatory02-ad1", "env_var": "STACK_OCID_AD1", "ad": 1, "ocpus": 2, "memory_gb": 12},
+    {"name": "purgatory02-ad1e", "env_var": "STACK_OCID_AD1E", "ad": 1, "ocpus": 1, "memory_gb": 6},
+    {"name": "purgatory02-ad2", "env_var": "STACK_OCID_AD2", "ad": 2, "ocpus": 2, "memory_gb": 12},
+    {"name": "purgatory02-ad2e", "env_var": "STACK_OCID_AD2E", "ad": 2, "ocpus": 1, "memory_gb": 6},
+    {"name": "purgatory02-ad3", "env_var": "STACK_OCID_AD3", "ad": 3, "ocpus": 2, "memory_gb": 12},
+    {"name": "purgatory02-ad3e", "env_var": "STACK_OCID_AD3E", "ad": 3, "ocpus": 1, "memory_gb": 6},
 )
 
-STACK_BY_OCID = {stack.ocid: stack for stack in STACKS}
+
+def load_stacks() -> tuple[StackSpec, ...]:
+    """Load StackSpec objects dynamically from environment variables."""
+    json_raw = os.getenv("STACK_OCIDS", "").strip()
+    json_map: dict[str, str] = {}
+    if json_raw:
+        try:
+            json_map = json.loads(json_raw)
+        except json.JSONDecodeError:
+            pass
+
+    stacks: list[StackSpec] = []
+    for spec in DEFAULT_STACK_METADATA:
+        name = spec["name"]
+        env_var = spec["env_var"]
+        ocid = (
+            os.getenv(env_var, "").strip()
+            or json_map.get(name, "").strip()
+            or json_map.get(env_var, "").strip()
+        )
+        stacks.append(
+            StackSpec(
+                name=name,
+                ocid=ocid,
+                ad=int(spec["ad"]),
+                ocpus=float(spec["ocpus"]),
+                memory_gb=float(spec["memory_gb"]),
+            )
+        )
+    return tuple(stacks)
+
+
+STACKS: tuple[StackSpec, ...] = load_stacks()
+STACK_BY_OCID = {stack.ocid: stack for stack in STACKS if stack.ocid}
 STACK_BY_NAME = {stack.name: stack for stack in STACKS}
 
 

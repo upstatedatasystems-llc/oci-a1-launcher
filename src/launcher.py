@@ -30,6 +30,7 @@ from common import (
     classify_a1_instances,
     create_oci_clients,
     exclusive_lock,
+    get_env_required,
     infer_ad_number,
     instance_summary,
     load_state,
@@ -43,14 +44,8 @@ from common import (
     utc_iso,
 )
 
-COMPARTMENT_OCID = os.getenv(
-    "COMPARTMENT_OCID",
-    "ocid1.tenancy.oc1..aaaaaaaasfpgi6ej475ks2plpm5nkd5hger2uwx2huhojdk3fd4izlscxz3q",
-).strip()
-CONTROL_INSTANCE_OCID = os.getenv(
-    "CONTROL_INSTANCE_OCID",
-    "ocid1.instance.oc1.iad.anuwcljt5gdmbsacpsljdzidykkq6kn67ewyooo77q73gmepc4oee65yqi6a",
-).strip()
+COMPARTMENT_OCID = get_env_required("COMPARTMENT_OCID")
+CONTROL_INSTANCE_OCID = get_env_required("CONTROL_INSTANCE_OCID")
 CONTROL_INSTANCE_NAME = os.getenv("CONTROL_INSTANCE_NAME", "purgatory01-vm").strip()
 JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "1200"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "20"))

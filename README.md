@@ -82,18 +82,18 @@ In the OCI Console under **Identity & Security** > **Policies** (created in the 
 
 ## Expected Resource Manager Stacks
 
-The launcher expects six pre-created OCI Resource Manager Terraform stacks:
+The launcher expects six pre-created OCI Resource Manager Terraform stacks. Their OCIDs are configured via environment variables in `/etc/oci-a1-launcher/launcher.env`:
 
-| Stack Name | AD | OCPUs | Memory (GB) | Description |
+| Stack Name | AD | OCPUs | Memory (GB) | Environment Variable |
 | :--- | :---: | :---: | :---: | :--- |
-| `purgatory02-ad1` | 1 | 2 | 12 | Primary 2/12 stack in Availability Domain 1 |
-| `purgatory02-ad1e` | 1 | 1 | 6 | Secondary 1/6 stack in Availability Domain 1 |
-| `purgatory02-ad2` | 2 | 2 | 12 | Primary 2/12 stack in Availability Domain 2 |
-| `purgatory02-ad2e` | 2 | 1 | 6 | Secondary 1/6 stack in Availability Domain 2 |
-| `purgatory02-ad3` | 3 | 2 | 12 | Primary 2/12 stack in Availability Domain 3 |
-| `purgatory02-ad3e` | 3 | 1 | 6 | Secondary 1/6 stack in Availability Domain 3 |
+| `purgatory02-ad1` | 1 | 2 | 12 | `STACK_OCID_AD1` |
+| `purgatory02-ad1e` | 1 | 1 | 6 | `STACK_OCID_AD1E` |
+| `purgatory02-ad2` | 2 | 2 | 12 | `STACK_OCID_AD2` |
+| `purgatory02-ad2e` | 2 | 1 | 6 | `STACK_OCID_AD2E` |
+| `purgatory02-ad3` | 3 | 2 | 12 | `STACK_OCID_AD3` |
+| `purgatory02-ad3e` | 3 | 1 | 6 | `STACK_OCID_AD3E` |
 
-These stack OCIDs are defined in [`src/common.py`](file:///C:/Users/mikea/Documents/GitHub/oci-a1-launcher/src/common.py#L56-L99).
+*(Alternatively, you can supply a single JSON map variable `STACK_OCIDS` containing `"stack-name": "ocid"` pairs).*
 
 ---
 
@@ -136,12 +136,19 @@ These stack OCIDs are defined in [`src/common.py`](file:///C:/Users/mikea/Docume
 
 The configuration file resides at `/etc/oci-a1-launcher/launcher.env`. Below is a reference of all supported variables:
 
-| Variable | Default Value | Description |
+| Variable | Default / Required | Description |
 | :--- | :--- | :--- |
 | `OCI_REGION` | `us-ashburn-1` | OCI Region containing your compartment and stacks |
 | `COMPARTMENT_OCID` | *(Required)* | OCID of the target compartment |
 | `CONTROL_INSTANCE_OCID` | *(Required)* | OCID of the control VM running this automation |
 | `CONTROL_INSTANCE_NAME` | `purgatory01-vm` | Human-readable name of the control server |
+| `STACK_OCID_AD1` | *(Required)* | Resource Manager Stack OCID for AD-1 (2 OCPU / 12 GB) |
+| `STACK_OCID_AD1E` | *(Required)* | Resource Manager Stack OCID for AD-1 (1 OCPU / 6 GB) |
+| `STACK_OCID_AD2` | *(Required)* | Resource Manager Stack OCID for AD-2 (2 OCPU / 12 GB) |
+| `STACK_OCID_AD2E` | *(Required)* | Resource Manager Stack OCID for AD-2 (1 OCPU / 6 GB) |
+| `STACK_OCID_AD3` | *(Required)* | Resource Manager Stack OCID for AD-3 (2 OCPU / 12 GB) |
+| `STACK_OCID_AD3E` | *(Required)* | Resource Manager Stack OCID for AD-3 (1 OCPU / 6 GB) |
+| `STACK_OCIDS` | *(Optional)* | JSON string mapping stack names to OCIDs (alternative to individual env vars) |
 | `LOCAL_TIMEZONE` | `America/New_York` | Timezone for reports and log entries |
 | `DATA_DIR` | `/var/lib/oci-a1-launcher` | Directory holding runtime state and logs |
 | `SMTP_HOST` | `smtp.gmail.com` | SMTP server host |
