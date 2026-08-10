@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG=/etc/oci-a1-launcher/launcher.env
+PYTHON=/opt/oci-a1-launcher/venv/bin/python
+LAUNCHER=/opt/oci-a1-launcher/src/launcher.py
+REPORTER=/opt/oci-a1-launcher/src/daily_report.py
+DATA_DIR=/var/lib/oci-a1-launcher
+
+if [[ ! -r "$CONFIG" ]]; then
+  echo "Cannot read $CONFIG. Run with sudo." >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "$CONFIG"
+set +a
+
+command_name="${1:-status}"
+shift || true
+case "$command_name" in
+  doctor)
+    exec "$PYTHON" "$LAUNCHER" doctor "$@"
+    ;;
+  test-email)
+    exec "$PYTHON" "$LAUNCHER" doctor --send-test-email
+    ;;
+  run)
+    exec "$PYTHON" "$LAUNCHER" run
+    ;;
+  status)
+    exec "$PYTHON" "$LAUNCHER" status
+    ;;
+  daily-report)
+    exec "$PYTHON" "$REPORTER"
+    ;;
+  pause)
+    install -d -m 0700 "$DATA_DIR"
+    touch "$DATA_DIR/PAUSED"
+    chmod 0600 "$DATA_DIR/PAUSED"
+    echo "Launcher paused. The daily report timer remains enabled."
+    ;;
+  resume)
+    rm -f "$DATA_DIR/PAUSED"
+    systemctl enable --now oci-a1-launcher.timer
+    echo "Launcher resumed."
+    ;;
+  stop)
+    touch "$DATA_DIR/PAUSED"
+    chmod 0600 "$DATA_DIR/PAUSED"
+    systemctl disable --now oci-a1-launcher.timer
+    echo "Launcher paused and timer disabled."
+    ;;
+  start)
+    rm -f "$DATA_DIR/PAUSED"
+    systemctl enable --now oci-a1-launcher.timer oci-a1-daily-report.timer
+    echo "Launcher and daily report timers enabled."
+    ;;
+  *)
+    echo "Usage: sudo oci-a1-launcherctl {doctor|test-email|run|status|daily-report|pause|resume|stop|start}" >&2
+    exit 2
+    ;;
+esac

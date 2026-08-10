@@ -1,0 +1,17 @@
+[Unit]
+Description=OCI Always Free A1 Resource Manager launcher
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/oci-a1-launcher/launcher.env
+WorkingDirectory=/opt/oci-a1-launcher
+ExecStart=/opt/oci-a1-launcher/venv/bin/python /opt/oci-a1-launcher/src/launcher.py run
+TimeoutStartSec=30min
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

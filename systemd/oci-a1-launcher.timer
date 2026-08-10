@@ -1,0 +1,11 @@
+[Unit]
+Description=Run OCI A1 launcher every 40 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=40min
+AccuracySec=1s
+Unit=oci-a1-launcher.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,82 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment and configuration secret files
+*.env
+*.env.*
+!config/launcher.env.example
+
+# Runtime data directory and state files
+/var/lib/oci-a1-launcher/
+events.jsonl
+state.json
+launcher.lock
+PAUSED
+COMPLETE.json
+THROTTLED.json
+*.corrupt-*.json
+
+# Backups and logs
+*.log
+/var/backups/oci-a1-launcher/
+*.tar.gz
+*.zip
+*.tar
+*.gz
+
+# Credentials, keys, and certificates
+*.pem
+*.key
+*.pub
+*.pfx
+*.crt
+*.cer
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# Operating system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

@@ -1,0 +1,11 @@
+[Unit]
+Description=Send OCI A1 launcher report at 7:50 AM Eastern
+
+[Timer]
+OnCalendar=*-*-* 07:50:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=oci-a1-daily-report.service
+
+[Install]
+WantedBy=timers.target
