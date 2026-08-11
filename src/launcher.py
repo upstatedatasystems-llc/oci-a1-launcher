@@ -879,6 +879,19 @@ def print_candidates() -> int:
         print("  Next 1/6 candidate:  None eligible")
     print()
     print("NOTE: This diagnostic command is strictly READ-ONLY. No jobs were submitted and no OCI resources were modified.")
+def print_status() -> int:
+    state = load_state()
+    print(json.dumps(state, indent=2, sort_keys=True))
+    print(f"Paused: {PAUSE_FILE.exists()}")
+    print(f"Complete: {COMPLETE_FILE.exists()}")
+    cooldown = load_throttle_cooldown()
+    if cooldown:
+        until = cooldown["until_datetime"]
+        print(f"Throttled: True (until {local_timestamp(until)} / {utc_iso(until)})")
+    else:
+        print("Throttled: False")
+    if COMPLETE_FILE.exists():
+        print(COMPLETE_FILE.read_text(encoding="utf-8"))
     return 0
 
 

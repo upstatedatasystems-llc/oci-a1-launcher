@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.2
+
+- Restores the `print_status` function in `src/launcher.py` required by `sudo oci-a1-launcherctl status`.
+- Fixes `NameError: name 'print_status' is not defined` when executing `launcherctl status`.
+- Preserves exact status output reporting current `state.json`, `Paused` status, `Complete` status, and `Throttled` cooldown status.
+- Adds CLI dispatch audit and regression unit tests for `status` command execution and subparser targets in `tests/test_launcher.py`.
+- No changes to provisioning behavior, stack selection, rotation, or OCI Resource Manager submission logic.
+
 ## 1.2.1
 
 - Fixes test isolation in `tests/test_launcher.py` by centralizing automatic test setup in an isolated temporary workspace directory.

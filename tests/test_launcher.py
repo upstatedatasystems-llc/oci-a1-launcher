@@ -1,11 +1,14 @@
-"""Regression unit tests for OCI A1 Launcher v1.2.1 hermetic test isolation and stack selection logic."""
+"""Regression unit tests for OCI A1 Launcher v1.2.2 CLI dispatch and stack selection logic."""
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -28,7 +31,7 @@ from launcher import (
 )
 
 
-class TestLauncherV121(unittest.TestCase):
+class TestLauncherV122(unittest.TestCase):
     def setUp(self) -> None:
         self._orig_env = dict(os.environ)
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -214,13 +217,66 @@ class TestLauncherV121(unittest.TestCase):
         os.environ["STACK_OCID_AD3"] = "ocid1.ormstack.ad3"
         os.environ["STACK_OCID_AD3E"] = "ocid1.ormstack.ad3e"
 
-        # Verify that get_candidate_plan reads from the isolated temp_dir patched in setUp,
-        # without raising PermissionError or touching root-only production paths.
         with patch("common.STACKS", load_stacks()):
             plan = get_candidate_plan()
             self.assertIn("paused", plan)
             self.assertFalse(plan["paused"])
             self.assertIn("all_stacks", plan)
+
+    def test_status_command_execution_and_reporting(self) -> None:
+        """Test status command execution with synthetic Paused, Complete, and Throttled states."""
+        # 1. Base status output
+        with patch("sys.stdout", new=io.StringIO()) as fake_out:
+            ret = launcher.print_status()
+            self.assertEqual(ret, 0)
+            out = fake_out.getvalue()
+            self.assertIn('"next_ad_index": 0', out)
+            self.assertIn("Paused: False", out)
+            self.assertIn("Complete: False", out)
+            self.assertIn("Throttled: False", out)
+
+        # 2. Synthetic Paused + Complete + Throttled state
+        temp_path = Path(self.temp_dir.name)
+        (temp_path / "PAUSED").touch()
+        (temp_path / "COMPLETE.json").write_text('{"reason": "TEST_COMPLETE"}')
+        cooldown_until = launcher.now_utc() + timedelta(seconds=1800)
+        throttle_payload = {
+            "until": launcher.utc_iso(cooldown_until),
+            "status": 429,
+            "code": "TooManyRequests",
+        }
+        (temp_path / "THROTTLED.json").write_text(json.dumps(throttle_payload))
+
+        with patch("sys.stdout", new=io.StringIO()) as fake_out:
+            ret = launcher.print_status()
+            self.assertEqual(ret, 0)
+            out = fake_out.getvalue()
+            self.assertIn("Paused: True", out)
+            self.assertIn("Complete: True", out)
+            self.assertIn("Throttled: True", out)
+            self.assertIn("TEST_COMPLETE", out)
+
+    def test_all_cli_dispatch_targets_exist_and_resolve(self) -> None:
+        """Audit test: Verify every CLI command dispatched by main() resolves to an existing function."""
+        with patch("sys.argv", ["launcher.py", "status"]), patch("launcher.print_status", return_value=0) as mock_status:
+            self.assertEqual(launcher.main(), 0)
+            mock_status.assert_called_once()
+
+        with patch("sys.argv", ["launcher.py", "candidates"]), patch("launcher.print_candidates", return_value=0) as mock_cand:
+            self.assertEqual(launcher.main(), 0)
+            mock_cand.assert_called_once()
+
+        with patch("sys.argv", ["launcher.py", "plan"]), patch("launcher.print_candidates", return_value=0) as mock_plan:
+            self.assertEqual(launcher.main(), 0)
+            mock_plan.assert_called_once()
+
+        with patch("sys.argv", ["launcher.py", "run"]), patch("launcher.run_once", return_value=0) as mock_run:
+            self.assertEqual(launcher.main(), 0)
+            mock_run.assert_called_once()
+
+        with patch("sys.argv", ["launcher.py", "doctor"]), patch("launcher.doctor", return_value=0) as mock_doc:
+            self.assertEqual(launcher.main(), 0)
+            mock_doc.assert_called_once_with(False)
 
 
 if __name__ == "__main__":
