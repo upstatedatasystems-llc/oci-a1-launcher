@@ -29,6 +29,9 @@ case "$command_name" in
   candidates|plan)
     exec "$PYTHON" "$LAUNCHER" candidates "$@"
     ;;
+  resize-plan)
+    exec "$PYTHON" "$LAUNCHER" resize-plan "$@"
+    ;;
   run)
     exec "$PYTHON" "$LAUNCHER" run
     ;;
@@ -61,7 +64,7 @@ case "$command_name" in
     echo "Launcher and daily report timers enabled."
     ;;
   *)
-    echo "Usage: sudo oci-a1-launcherctl {doctor|test-email|candidates|plan|run|status|daily-report|pause|resume|stop|start}" >&2
+    echo "Usage: sudo oci-a1-launcherctl {doctor|test-email|candidates|plan|resize-plan|run|status|daily-report|pause|resume|stop|start}" >&2
     exit 2
     ;;
 esac

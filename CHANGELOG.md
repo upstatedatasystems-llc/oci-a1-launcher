@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0
+
+- Adds new `PROVISIONING_MODE=RESIZE_ONLY` operating mode for resizing existing Always Free Ampere A1 VMs (e.g., 1 OCPU / 6 GB to 2 OCPU / 12 GB) via an existing Resource Manager stack.
+- Completely bypasses standard candidate rotation and new-instance provisioning logic when `RESIZE_ONLY` mode is active.
+- Guarantees absolute safety: in `RESIZE_ONLY` mode, ZERO execution path can call create/apply on any other stack (AD1, AD2, `purgatory03-ad3e`, etc.).
+- Eliminates capacity-report prechecks (`CreateComputeCapacityReport`) in `RESIZE_ONLY` mode to submit actual Resource Manager APPLY jobs each cycle without lagging capacity-report info.
+- Authorizes `RESIZE_STACK_OCID` for resize attempts regardless of whether its OCID appears in `successful_stack_ocids`.
+- Preserves existing VM intact on Out of Host Capacity errors during resize, with zero fallback to other stacks or ADs.
+- Automatically marks provisioning complete (`COMPLETE.json`) once Compute API confirms instance reaches or exceeds target shape (`RESIZE_TARGET_OCPUS` / `RESIZE_TARGET_MEMORY_GB`).
+- Adds strictly read-only `sudo oci-a1-launcherctl resize-plan` (and `launcher.py resize-plan`) diagnostic command showing target instance, current vs target shape, resize stack, active jobs, and next cycle action without making OCI mutations.
+- Fails safe if required `RESIZE_*` variables are missing or use placeholder values when `RESIZE_ONLY` mode is enabled.
+- Updates `upgrade.sh` to append `PROVISIONING_MODE` and `RESIZE_*` settings and validate configuration.
+- Adds comprehensive 12-case regression unit test suite in `tests/test_launcher.py`.
+
 ## 1.2.2
 
 - Restores the `print_status` function in `src/launcher.py` required by `sudo oci-a1-launcherctl status`.

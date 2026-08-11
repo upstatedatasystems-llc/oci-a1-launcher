@@ -72,14 +72,28 @@ append_env_key_if_missing STACK_OCID_AD3E "REPLACE_WITH_STACK_OCID_AD3E"
 # Safely append default for optional extra small stacks (v1.2.0+)
 append_env_key_if_missing EXTRA_SMALL_STACKS_JSON "[]" "Optional additional 1 OCPU / 6 GB stacks (v1.2.0+)"
 
+# Safely append defaults for resize-only provisioning mode (v1.3.0+)
+append_env_key_if_missing PROVISIONING_MODE "STANDARD" "Provisioning Mode: STANDARD (new instances) or RESIZE_ONLY (resize existing VM)"
+append_env_key_if_missing RESIZE_INSTANCE_OCID "REPLACE_WITH_EXISTING_INSTANCE_OCID" "Target instance OCID for RESIZE_ONLY mode"
+append_env_key_if_missing RESIZE_STACK_OCID "REPLACE_WITH_EXISTING_STACK_OCID" "Resource Manager stack OCID managing target instance for RESIZE_ONLY mode"
+append_env_key_if_missing RESIZE_TARGET_OCPUS "2" "Target OCPUs for RESIZE_ONLY mode"
+append_env_key_if_missing RESIZE_TARGET_MEMORY_GB "12" "Target Memory (GB) for RESIZE_ONLY mode"
+
 chmod 0600 "$CONFIG"
 
 systemctl daemon-reload
 systemctl reset-failed oci-a1-launcher.service oci-a1-daily-report.service 2>/dev/null || true
 
-# Validate stack OCIDs configuration
+# Validate configuration
 config_valid=true
-if grep -qE "^STACK_OCIDS=" "$CONFIG" && ! grep -qE "^STACK_OCIDS=.*(REPLACE|example)" "$CONFIG"; then
+mode="$(grep -E "^PROVISIONING_MODE=" "$CONFIG" | cut -d'=' -f2- | tr -d ' "' | tr '[:lower:]' '[:upper:]' || true)"
+if [[ "$mode" == "RESIZE_ONLY" ]]; then
+  res_inst="$(grep -E "^RESIZE_INSTANCE_OCID=" "$CONFIG" | cut -d'=' -f2- | tr -d ' "' || true)"
+  res_stk="$(grep -E "^RESIZE_STACK_OCID=" "$CONFIG" | cut -d'=' -f2- | tr -d ' "' || true)"
+  if [[ -z "$res_inst" || "$res_inst" == *"REPLACE"* || "$res_inst" == *"example"* || -z "$res_stk" || "$res_stk" == *"REPLACE"* || "$res_stk" == *"example"* ]]; then
+    config_valid=false
+  fi
+elif grep -qE "^STACK_OCIDS=" "$CONFIG" && ! grep -qE "^STACK_OCIDS=.*(REPLACE|example)" "$CONFIG"; then
   config_valid=true
 else
   for key in STACK_OCID_AD1 STACK_OCID_AD1E STACK_OCID_AD2 STACK_OCID_AD2E STACK_OCID_AD3 STACK_OCID_AD3E; do

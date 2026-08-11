@@ -34,6 +34,8 @@ from common import (
     create_oci_clients,
     exclusive_lock,
     get_env_required,
+    get_resize_config,
+    get_stack_for_ocid,
     infer_ad_number,
     instance_summary,
     load_state,
@@ -46,6 +48,8 @@ from common import (
     stack_as_dict,
     utc_iso,
 )
+
+SERVICE_ERROR_TYPE = (oci.exceptions.ServiceError,) if oci is not None and hasattr(oci, "exceptions") else ()
 
 COMPARTMENT_OCID = os.getenv("COMPARTMENT_OCID", "").strip()
 CONTROL_INSTANCE_OCID = os.getenv("CONTROL_INSTANCE_OCID", "").strip()
@@ -75,24 +79,29 @@ def list_a1_instances(compute: oci.core.ComputeClient) -> list[dict[str, Any]]:
 
 
 def active_resource_manager_jobs(resource_manager: oci.resource_manager.ResourceManagerClient) -> list[dict[str, Any]]:
-    """Find active jobs for the six managed stacks with one compartment-wide API call."""
+    """Find active jobs for managed stacks with one compartment-wide API call."""
     managed_stack_ids = set(STACK_BY_OCID)
-    jobs = resource_manager.list_jobs(
-        compartment_id=COMPARTMENT_OCID,
-        sort_by="TIMECREATED",
-        sort_order="DESC",
-        limit=100,
-        # Fail fast on throttling so the launcher can enter its one-hour cooldown
-        # instead of making repeated SDK retry attempts.
-        retry_strategy=oci.retry.NoneRetryStrategy(),
-    ).data
+    resize_cfg = get_resize_config()
+    if resize_cfg["stack_ocid"]:
+        managed_stack_ids.add(resize_cfg["stack_ocid"])
+
+    kwargs: dict[str, Any] = {
+        "compartment_id": COMPARTMENT_OCID,
+        "sort_by": "TIMECREATED",
+        "sort_order": "DESC",
+        "limit": 100,
+    }
+    if oci is not None and hasattr(oci, "retry"):
+        kwargs["retry_strategy"] = oci.retry.NoneRetryStrategy()
+
+    jobs = resource_manager.list_jobs(**kwargs).data
     active: list[dict[str, Any]] = []
     for job in jobs:
         stack_id = getattr(job, "stack_id", None)
         state = getattr(job, "lifecycle_state", None)
         if stack_id not in managed_stack_ids or state not in ACTIVE_JOB_STATES:
             continue
-        stack = STACK_BY_OCID[stack_id]
+        stack = get_stack_for_ocid(stack_id)
         active.append(
             {
                 "stack_name": stack.name,
@@ -217,17 +226,27 @@ def create_apply_job(
     run_id: str,
 ) -> Any:
     display_name = f"a1-auto-{stack.name}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    details = oci.resource_manager.models.CreateJobDetails(
-        stack_id=stack.ocid,
-        display_name=display_name,
-        operation="APPLY",
-        job_operation_details=oci.resource_manager.models.CreateApplyJobOperationDetails(
+    if oci is not None and hasattr(oci, "resource_manager"):
+        details = oci.resource_manager.models.CreateJobDetails(
+            stack_id=stack.ocid,
+            display_name=display_name,
             operation="APPLY",
-            execution_plan_strategy="AUTO_APPROVED",
-            is_provider_upgrade_required=False,
-        ),
-        freeform_tags={"a1-launcher": "true", "run-id": run_id[:32]},
-    )
+            job_operation_details=oci.resource_manager.models.CreateApplyJobOperationDetails(
+                operation="APPLY",
+                execution_plan_strategy="AUTO_APPROVED",
+                is_provider_upgrade_required=False,
+            ),
+            freeform_tags={"a1-launcher": "true", "run-id": run_id[:32]},
+        )
+    else:
+        from types import SimpleNamespace
+
+        details = SimpleNamespace(
+            stack_id=stack.ocid,
+            display_name=display_name,
+            operation="APPLY",
+        )
+
     return resource_manager.create_job(create_job_details=details).data
 
 
@@ -468,6 +487,150 @@ def validate_inventory(classification: dict[str, Any]) -> str | None:
     return None
 
 
+def run_resize_only_cycle(
+    compute: oci.core.ComputeClient,
+    resource_manager: oci.resource_manager.ResourceManagerClient,
+    state: dict[str, Any],
+    run_id: str,
+) -> int:
+    """Execute one launcher cycle in RESIZE_ONLY mode.
+
+    ABSOLUTE SAFETY GUARANTEE:
+    This function ONLY references or attempts RESIZE_STACK_OCID.
+    No other stack (AD1, AD2, etc.) can ever be created or applied.
+    """
+    resize_cfg = get_resize_config()
+    if not resize_cfg["is_configured"]:
+        append_event(
+            {
+                "event_type": "system_error",
+                "run_id": run_id,
+                "stage": "resize_configuration_validation",
+                "message": (
+                    "PROVISIONING_MODE=RESIZE_ONLY is set, but required RESIZE_INSTANCE_OCID or "
+                    "RESIZE_STACK_OCID is missing or uses placeholder values. "
+                    "Please edit /etc/oci-a1-launcher/launcher.env."
+                ),
+            }
+        )
+        return 1
+
+    instance_ocid = resize_cfg["instance_ocid"]
+    stack_ocid = resize_cfg["stack_ocid"]
+    target_ocpus = resize_cfg["target_ocpus"]
+    target_memory_gb = resize_cfg["target_memory_gb"]
+    resize_stack = get_stack_for_ocid(stack_ocid)
+
+    # 1. Fetch current target instance state from OCI Compute API
+    try:
+        instance_data = compute.get_instance(instance_ocid).data
+        instance_dict = serialize_instance(instance_data)
+    except Exception as exc:
+        append_event(
+            {
+                "event_type": "system_error",
+                "run_id": run_id,
+                "stage": "resize_instance_lookup",
+                "message": f"Failed to fetch target instance {instance_ocid}: {exc}",
+            }
+        )
+        return 1
+
+    current_ocpus = instance_dict["ocpus"]
+    current_memory_gb = instance_dict["memory_gb"]
+
+    # 2. Check if instance is already at or above target shape
+    if current_ocpus >= target_ocpus and current_memory_gb >= target_memory_gb:
+        classification = classify_a1_instances([instance_dict])
+        mark_complete(
+            classification,
+            f"Resize target reached: {instance_dict.get('display_name')} is {current_ocpus:g} OCPU / {current_memory_gb:g} GB",
+        )
+        return 0
+
+    # 3. Check for active RM jobs for RESIZE_STACK_OCID
+    active_jobs = active_resource_manager_jobs(resource_manager)
+    resize_active_jobs = [j for j in active_jobs if j["stack_ocid"] == stack_ocid]
+    if resize_active_jobs:
+        append_event(
+            {
+                "event_type": "run_skip",
+                "run_id": run_id,
+                "reason": "ACTIVE_RESOURCE_MANAGER_JOB",
+                "active_jobs": resize_active_jobs,
+            }
+        )
+        return 0
+
+    # 4. Dry Run check
+    if DRY_RUN:
+        append_event(
+            {
+                "event_type": "dry_run",
+                "run_id": run_id,
+                "stage": "resize_only",
+                "stack": stack_as_dict(resize_stack),
+                "target_instance": instance_dict,
+                "target_shape": {"ocpus": target_ocpus, "memory_gb": target_memory_gb},
+                "result": "DRY_RUN_RESIZE_NOT_SUBMITTED",
+            }
+        )
+        return 0
+
+    # 5. Submit APPLY for RESIZE_STACK_OCID ONLY
+    submitted = create_apply_job(resource_manager, resize_stack, run_id)
+    job_id = getattr(submitted, "id", None) or str(submitted)
+    job, timed_out = wait_for_job(resource_manager, job_id)
+    errors = get_error_lines(resource_manager, job_id)
+    capacity_error = is_capacity_error(errors, job)
+
+    event = record_job_event(
+        run_id=run_id,
+        stack=resize_stack,
+        job=job,
+        timed_out=timed_out,
+        errors=errors,
+        capacity_error=capacity_error,
+        before_instances=[instance_dict],
+        after_instances=[instance_dict],
+    )
+
+    if capacity_error:
+        # Logged by record_job_event; no fallback attempt is made.
+        return 0
+    if timed_out:
+        return 0
+    if getattr(job, "lifecycle_state", None) != "SUCCEEDED":
+        return 1
+
+    # 6. Re-query instance to verify resize completion
+    try:
+        refreshed_data = compute.get_instance(instance_ocid).data
+        refreshed_dict = serialize_instance(refreshed_data)
+        refreshed_classification = classify_a1_instances([refreshed_dict])
+
+        if (
+            refreshed_dict["ocpus"] >= target_ocpus
+            and refreshed_dict["memory_gb"] >= target_memory_gb
+        ):
+            mark_complete(
+                refreshed_classification,
+                f"Resize succeeded: {refreshed_dict.get('display_name')} is now {refreshed_dict['ocpus']:g} OCPU / {refreshed_dict['memory_gb']:g} GB",
+            )
+            success_email(event, refreshed_classification)
+    except Exception as exc:
+        append_event(
+            {
+                "event_type": "system_error",
+                "run_id": run_id,
+                "stage": "resize_post_apply_verification",
+                "message": f"Apply succeeded, but failed to verify instance state: {exc}",
+            }
+        )
+
+    return 0
+
+
 def run_once() -> int:
     run_id = str(uuid.uuid4())
     run_started = now_utc()
@@ -493,6 +656,48 @@ def run_once() -> int:
             )
             return 0
 
+        get_env_required("COMPARTMENT_OCID")
+        get_env_required("CONTROL_INSTANCE_OCID")
+
+        resize_cfg = get_resize_config()
+        if resize_cfg["is_resize_only"]:
+            state = load_state()
+            append_event({"event_type": "run_start", "run_id": run_id, "mode": "RESIZE_ONLY", "dry_run": DRY_RUN})
+            try:
+                compute, resource_manager = create_oci_clients()
+                control = get_control_instance(compute)
+                if control["lifecycle_state"] not in NON_TERMINATED_INSTANCE_STATES:
+                    raise RuntimeError(
+                        f"Control instance {CONTROL_INSTANCE_NAME} is not active: {control['lifecycle_state']}"
+                    )
+                return run_resize_only_cycle(compute, resource_manager, state, run_id)
+            except SERVICE_ERROR_TYPE as exc:
+                if exc.status == 429:
+                    set_throttle_cooldown(exc, run_id)
+                    return 0
+                append_event(
+                    {
+                        "event_type": "system_error",
+                        "run_id": run_id,
+                        "stage": "oci_service",
+                        "status": exc.status,
+                        "code": exc.code,
+                        "message": exc.message,
+                        "opc_request_id": exc.request_id,
+                    }
+                )
+                return 1
+            except Exception as exc:
+                append_event(
+                    {
+                        "event_type": "system_error",
+                        "run_id": run_id,
+                        "stage": "unhandled_exception",
+                        "message": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                return 1
+
         unconfigured = [
             stack.name
             for stack in STACKS
@@ -511,9 +716,6 @@ def run_once() -> int:
                 }
             )
             return 1
-
-        get_env_required("COMPARTMENT_OCID")
-        get_env_required("CONTROL_INSTANCE_OCID")
 
         state = load_state()
         append_event({"event_type": "run_start", "run_id": run_id, "dry_run": DRY_RUN})
@@ -651,7 +853,7 @@ def run_once() -> int:
                 }
             )
             return 1
-        except oci.exceptions.ServiceError as exc:
+        except SERVICE_ERROR_TYPE as exc:
             if exc.status == 429 or str(exc.code).lower() == "toomanyrequests":
                 set_throttle_cooldown(exc, run_id)
                 # Throttling is temporary and expected. Return success so systemd
@@ -691,6 +893,51 @@ def run_once() -> int:
 
 
 def doctor(send_test: bool) -> int:
+    resize_cfg = get_resize_config()
+    if resize_cfg["is_resize_only"]:
+        if not resize_cfg["is_configured"]:
+            print("ERROR: PROVISIONING_MODE=RESIZE_ONLY is set, but RESIZE_INSTANCE_OCID or RESIZE_STACK_OCID is missing or uses placeholder values.")
+            print("Please edit /etc/oci-a1-launcher/launcher.env and populate RESIZE_INSTANCE_OCID and RESIZE_STACK_OCID.")
+            return 1
+
+        print(f"Provisioning Mode: {resize_cfg['mode']}")
+        print(f"Region: {REGION}")
+        print(f"Compartment: {COMPARTMENT_OCID}")
+        print(f"Control instance: {CONTROL_INSTANCE_NAME} ({CONTROL_INSTANCE_OCID})")
+        print(f"Dry run: {DRY_RUN}")
+
+        compute, resource_manager = create_oci_clients()
+        control = get_control_instance(compute)
+        print("Control instance API access: OK")
+        print(json.dumps(control, indent=2))
+
+        try:
+            target_inst = compute.get_instance(resize_cfg["instance_ocid"]).data
+            serialized_target = serialize_instance(target_inst)
+            print(f"Resize target instance visible: OK ({instance_summary(serialized_target)})")
+        except Exception as exc:
+            print(f"ERROR: Target instance access failed ({resize_cfg['instance_ocid']}): {exc}")
+            return 1
+
+        try:
+            fetched_stack = resource_manager.get_stack(resize_cfg["stack_ocid"]).data
+            display_name = getattr(fetched_stack, "display_name", "resize-stack")
+            print(f"Resize stack access OK: {display_name} ({resize_cfg['stack_ocid']})")
+        except Exception as exc:
+            print(f"ERROR: Resize stack access failed ({resize_cfg['stack_ocid']}): {exc}")
+            return 1
+
+        if send_test:
+            timestamp = local_timestamp()
+            send_email(
+                f"OCI A1 Launcher - {timestamp} - TEST",
+                f"{timestamp} | {CONTROL_INSTANCE_NAME} | hostname={socket.gethostname()}\n\n"
+                "OCI instance-principal authentication, resize instance/stack access, and Gmail SMTP are working.\n\n"
+                "RESULT: TEST SUCCEEDED",
+            )
+            print("Test email sent.")
+        return 0
+
     unconfigured = [
         stack.name
         for stack in STACKS
@@ -879,8 +1126,168 @@ def print_candidates() -> int:
         print("  Next 1/6 candidate:  None eligible")
     print()
     print("NOTE: This diagnostic command is strictly READ-ONLY. No jobs were submitted and no OCI resources were modified.")
+    return 0
+
+
+def get_resize_plan() -> dict[str, Any]:
+    """Inspect current state and resize configuration, returning read-only diagnostic plan.
+
+    NO COMPUTE CAPACITY REPORT IS EVER CALLED.
+    """
+    resize_cfg = get_resize_config()
+    is_paused = PAUSE_FILE.exists()
+    is_complete = COMPLETE_FILE.exists()
+
+    instance_info: dict[str, Any] | None = None
+    stack_accessible = False
+    stack_name = "UNKNOWN"
+    active_jobs: list[dict[str, Any]] = []
+    oci_error: str | None = None
+
+    if not resize_cfg["is_configured"]:
+        return {
+            "mode": resize_cfg["mode"],
+            "is_configured": False,
+            "paused": is_paused,
+            "complete": is_complete,
+            "error": "RESIZE_INSTANCE_OCID or RESIZE_STACK_OCID is missing or uses placeholder values.",
+            "status_text": "FAILSAFE - CONFIGURATION MISSING OR PLACEHOLDER",
+            "next_action": "REFUSE TO SUBMIT JOBS (SAFE PAUSE)",
+            "instance": None,
+            "stack": {
+                "ocid": resize_cfg["stack_ocid"],
+                "name": stack_name,
+                "accessible": False,
+            },
+            "active_jobs": [],
+        }
+
+    instance_ocid = resize_cfg["instance_ocid"]
+    stack_ocid = resize_cfg["stack_ocid"]
+    target_ocpus = resize_cfg["target_ocpus"]
+    target_memory_gb = resize_cfg["target_memory_gb"]
+
+    try:
+        compute, resource_manager = create_oci_clients()
+        try:
+            inst_data = compute.get_instance(instance_ocid).data
+            instance_info = serialize_instance(inst_data)
+        except Exception as exc:
+            oci_error = f"Instance API error: {exc}"
+
+        try:
+            stk_data = resource_manager.get_stack(stack_ocid).data
+            stack_name = getattr(stk_data, "display_name", "resize-stack")
+            stack_accessible = True
+        except Exception as exc:
+            if not oci_error:
+                oci_error = f"Stack API error: {exc}"
+
+        try:
+            all_active = active_resource_manager_jobs(resource_manager)
+            active_jobs = [j for j in all_active if j["stack_ocid"] == stack_ocid]
+        except Exception as exc:
+            if not oci_error:
+                oci_error = f"Job listing error: {exc}"
+
+    except Exception as exc:
+        oci_error = f"OCI Client initialization error: {exc}"
+
+    current_ocpus = instance_info["ocpus"] if instance_info else 0.0
+    current_memory_gb = instance_info["memory_gb"] if instance_info else 0.0
+
+    target_reached = (
+        current_ocpus >= target_ocpus and current_memory_gb >= target_memory_gb
+    )
+
+    if is_complete or target_reached:
+        status_text = "RESIZE COMPLETE (Target reached)"
+        next_action = "NONE (Provisioning complete)"
+    elif active_jobs:
+        status_text = f"APPLY JOB ALREADY ACTIVE ({active_jobs[0].get('job_id')})"
+        next_action = f"WAIT FOR ACTIVE JOB ({active_jobs[0].get('job_id')})"
+    elif is_paused:
+        status_text = "RESIZE REQUIRED (LAUNCHER PAUSED)"
+        next_action = "PAUSED (No action will be taken until resumed)"
+    elif DRY_RUN:
+        status_text = "RESIZE REQUIRED (DRY RUN MODE)"
+        next_action = f"LOG DRY RUN ONLY (Would submit APPLY to {stack_name} / {stack_ocid})"
+    else:
+        status_text = "RESIZE REQUIRED"
+        next_action = f"SUBMIT APPLY TO {stack_name} ({stack_ocid})"
+
+    return {
+        "mode": resize_cfg["mode"],
+        "is_configured": True,
+        "paused": is_paused,
+        "complete": is_complete or target_reached,
+        "target_reached": target_reached,
+        "instance": instance_info,
+        "target_shape": {"ocpus": target_ocpus, "memory_gb": target_memory_gb},
+        "stack": {
+            "name": stack_name,
+            "ocid": stack_ocid,
+            "accessible": stack_accessible,
+        },
+        "active_jobs": active_jobs,
+        "oci_error": oci_error,
+        "status_text": status_text,
+        "next_action": next_action,
+    }
+
+
+def print_resize_plan() -> int:
+    plan = get_resize_plan()
+    print("=== OCI A1 Launcher Resize Plan (Read-Only) ===")
+    print(f"Provisioning Mode: {plan['mode']}")
+    print(f"Paused: {plan['paused']}")
+    print(f"Complete: {plan['complete']}")
+    print()
+
+    if not plan["is_configured"]:
+        print("--- Configuration Status ---")
+        print(f"Status: {plan['status_text']}")
+        print(f"Error:  {plan['error']}")
+        print(f"Next action: {plan['next_action']}")
+        print()
+        print("NOTE: This diagnostic command is strictly READ-ONLY. No capacity report was requested and no OCI resources were modified.")
+        return 0
+
+    if plan["oci_error"]:
+        print(f"NOTE: {plan['oci_error']}")
+        print()
+
+    print("--- Target Instance ---")
+    inst = plan["instance"]
+    if inst:
+        print(f"  Name:    {inst.get('display_name')}")
+        print(f"  OCID:    {inst.get('id')}")
+        print(f"  Current: {inst.get('ocpus'):g} OCPU / {inst.get('memory_gb'):g} GB RAM")
+    else:
+        print("  Instance details unavailable (OCI API offline or invalid OCID)")
+    t_shape = plan["target_shape"]
+    print(f"  Target:  {t_shape['ocpus']:g} OCPU / {t_shape['memory_gb']:g} GB RAM")
+    print()
+
+    print("--- Resize Stack ---")
+    stk = plan["stack"]
+    print(f"  Name:       {stk['name']}")
+    print(f"  OCID:       {stk['ocid']}")
+    print(f"  Accessible: {stk['accessible']}")
+    print()
+
+    print("--- Current Status & Action ---")
+    print(f"  Current status: {plan['status_text']}")
+    print(f"  Next cycle:     {plan['next_action']}")
+    print()
+    print("NOTE: This diagnostic command is strictly READ-ONLY. No capacity report was requested and no OCI resources were modified.")
+    return 0
+
+
 def print_status() -> int:
     state = load_state()
+    resize_cfg = get_resize_config()
+    print(f"Provisioning Mode: {resize_cfg['mode']}")
     print(json.dumps(state, indent=2, sort_keys=True))
     print(f"Paused: {PAUSE_FILE.exists()}")
     print(f"Complete: {COMPLETE_FILE.exists()}")
@@ -904,6 +1311,7 @@ def main() -> int:
     subparsers.add_parser("status", help="Print local launcher state")
     subparsers.add_parser("candidates", help="Inspect candidate stack selection (read-only)")
     subparsers.add_parser("plan", help="Inspect candidate stack selection (read-only)")
+    subparsers.add_parser("resize-plan", help="Inspect resize-only candidate plan (read-only)")
     args = parser.parse_args()
     if args.command == "run":
         return run_once()
@@ -913,6 +1321,8 @@ def main() -> int:
         return print_status()
     if args.command in ("candidates", "plan"):
         return print_candidates()
+    if args.command == "resize-plan":
+        return print_resize_plan()
     return 2
 
 

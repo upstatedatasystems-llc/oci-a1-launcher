@@ -192,6 +192,63 @@ STACK_BY_OCID = {stack.ocid: stack for stack in STACKS if stack.ocid}
 STACK_BY_NAME = {stack.name: stack for stack in STACKS}
 
 
+def get_resize_config() -> dict[str, Any]:
+    """Retrieve and validate PROVISIONING_MODE and RESIZE_* environment variables."""
+    mode = os.getenv("PROVISIONING_MODE", "STANDARD").strip().upper()
+    instance_ocid = os.getenv("RESIZE_INSTANCE_OCID", "").strip()
+    stack_ocid = os.getenv("RESIZE_STACK_OCID", "").strip()
+    try:
+        target_ocpus = float(os.getenv("RESIZE_TARGET_OCPUS", "2"))
+    except ValueError:
+        target_ocpus = 2.0
+    try:
+        target_memory_gb = float(os.getenv("RESIZE_TARGET_MEMORY_GB", "12"))
+    except ValueError:
+        target_memory_gb = 12.0
+
+    is_configured = bool(
+        instance_ocid
+        and stack_ocid
+        and "REPLACE" not in instance_ocid
+        and "example" not in instance_ocid.lower()
+        and "REPLACE" not in stack_ocid
+        and "example" not in stack_ocid.lower()
+        and target_ocpus > 0
+        and target_memory_gb > 0
+    )
+
+    return {
+        "mode": mode,
+        "is_resize_only": mode == "RESIZE_ONLY",
+        "instance_ocid": instance_ocid,
+        "stack_ocid": stack_ocid,
+        "target_ocpus": target_ocpus,
+        "target_memory_gb": target_memory_gb,
+        "is_configured": is_configured,
+    }
+
+
+def get_stack_for_ocid(ocid: str) -> StackSpec:
+    """Find StackSpec by OCID, or return a dynamic StackSpec if custom."""
+    if ocid in STACK_BY_OCID:
+        return STACK_BY_OCID[ocid]
+    try:
+        ocpus = float(os.getenv("RESIZE_TARGET_OCPUS", "2"))
+    except ValueError:
+        ocpus = 2.0
+    try:
+        memory_gb = float(os.getenv("RESIZE_TARGET_MEMORY_GB", "12"))
+    except ValueError:
+        memory_gb = 12.0
+    return StackSpec(
+        name="resize-stack",
+        ocid=ocid,
+        ad=3,
+        ocpus=ocpus,
+        memory_gb=memory_gb,
+    )
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -319,12 +376,23 @@ def create_oci_clients() -> tuple[oci.core.ComputeClient, oci.resource_manager.R
 
 
 def all_results(method: Any, *args: Any, **kwargs: Any) -> list[Any]:
-    response = oci.pagination.list_call_get_all_results(method, *args, **kwargs)
-    return list(response.data)
+    if oci is not None and hasattr(oci, "pagination"):
+        response = oci.pagination.list_call_get_all_results(method, *args, **kwargs)
+        return list(response.data)
+    response = method(*args, **kwargs)
+    return list(getattr(response, "data", []))
 
 
 def serialize_instance(instance: Any) -> dict[str, Any]:
     shape_config = getattr(instance, "shape_config", None)
+    tc = getattr(instance, "time_created", None)
+    if tc is not None and hasattr(tc, "isoformat") and callable(tc.isoformat):
+        tc_str = tc.isoformat()
+    elif isinstance(tc, str):
+        tc_str = tc
+    else:
+        tc_str = None
+
     return {
         "id": getattr(instance, "id", None),
         "display_name": getattr(instance, "display_name", None),
@@ -333,11 +401,7 @@ def serialize_instance(instance: Any) -> dict[str, Any]:
         "memory_gb": float(getattr(shape_config, "memory_in_gbs", 0) or 0),
         "availability_domain": getattr(instance, "availability_domain", None),
         "lifecycle_state": getattr(instance, "lifecycle_state", None),
-        "time_created": (
-            getattr(instance, "time_created", None).isoformat()
-            if getattr(instance, "time_created", None)
-            else None
-        ),
+        "time_created": tc_str,
     }
 
 

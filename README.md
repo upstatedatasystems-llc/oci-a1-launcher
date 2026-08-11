@@ -177,12 +177,17 @@ The configuration file resides at `/etc/oci-a1-launcher/launcher.env`. Below is 
 | `COMPARTMENT_OCID` | *(Required)* | OCID of the target compartment |
 | `CONTROL_INSTANCE_OCID` | *(Required)* | OCID of the control VM running this automation |
 | `CONTROL_INSTANCE_NAME` | `purgatory01-vm` | Human-readable name of the control server |
-| `STACK_OCID_AD1` | *(Required)* | Resource Manager Stack OCID for AD-1 (2 OCPU / 12 GB) |
-| `STACK_OCID_AD1E` | *(Required)* | Resource Manager Stack OCID for AD-1 (1 OCPU / 6 GB) |
-| `STACK_OCID_AD2` | *(Required)* | Resource Manager Stack OCID for AD-2 (2 OCPU / 12 GB) |
-| `STACK_OCID_AD2E` | *(Required)* | Resource Manager Stack OCID for AD-2 (1 OCPU / 6 GB) |
-| `STACK_OCID_AD3` | *(Required)* | Resource Manager Stack OCID for AD-3 (2 OCPU / 12 GB) |
-| `STACK_OCID_AD3E` | *(Required)* | Resource Manager Stack OCID for AD-3 (1 OCPU / 6 GB) |
+| `PROVISIONING_MODE` | `STANDARD` | Provisioning operating mode (`STANDARD` or `RESIZE_ONLY`) |
+| `RESIZE_INSTANCE_OCID` | *(Required for RESIZE_ONLY)* | Target instance OCID for `RESIZE_ONLY` mode |
+| `RESIZE_STACK_OCID` | *(Required for RESIZE_ONLY)* | Resource Manager stack OCID managing target instance |
+| `RESIZE_TARGET_OCPUS` | `2` | Target OCPU count for resize completion |
+| `RESIZE_TARGET_MEMORY_GB` | `12` | Target RAM (GB) for resize completion |
+| `STACK_OCID_AD1` | *(Required for STANDARD)* | Resource Manager Stack OCID for AD-1 (2 OCPU / 12 GB) |
+| `STACK_OCID_AD1E` | *(Required for STANDARD)* | Resource Manager Stack OCID for AD-1 (1 OCPU / 6 GB) |
+| `STACK_OCID_AD2` | *(Required for STANDARD)* | Resource Manager Stack OCID for AD-2 (2 OCPU / 12 GB) |
+| `STACK_OCID_AD2E` | *(Required for STANDARD)* | Resource Manager Stack OCID for AD-2 (1 OCPU / 6 GB) |
+| `STACK_OCID_AD3` | *(Required for STANDARD)* | Resource Manager Stack OCID for AD-3 (2 OCPU / 12 GB) |
+| `STACK_OCID_AD3E` | *(Required for STANDARD)* | Resource Manager Stack OCID for AD-3 (1 OCPU / 6 GB) |
 | `STACK_OCIDS` | *(Optional)* | JSON string mapping stack names to OCIDs (alternative to individual env vars) |
 | `EXTRA_SMALL_STACKS_JSON` | `[]` | Optional JSON array defining extra 1 OCPU / 6 GB stacks |
 | `LOCAL_TIMEZONE` | `America/New_York` | Timezone for reports and log entries |
@@ -200,6 +205,27 @@ The configuration file resides at `/etc/oci-a1-launcher/launcher.env`. Below is 
 | `THROTTLE_COOLDOWN_SECONDS` | `3600` | Cooldown period (seconds) after receiving OCI HTTP 429 |
 | `MAX_ERROR_LINES_PER_JOB` | `20` | Max error lines included per job in email reports |
 | `DRY_RUN` | `true` | When `true`, scans inventory without creating RM jobs |
+
+---
+
+## Resize-Only Operating Mode (v1.3.0+)
+
+When an existing Always Free Ampere A1 VM (such as `purgatory02`, 1 OCPU / 6 GB) has been deployed, and its underlying Terraform configuration in Resource Manager is updated to desired 2 OCPU / 12 GB shape configuration, set:
+
+```env
+PROVISIONING_MODE=RESIZE_ONLY
+RESIZE_INSTANCE_OCID=ocid1.instance.oc1.iad.your_existing_instance_ocid
+RESIZE_STACK_OCID=ocid1.ormstack.oc1.iad.your_existing_stack_ocid
+RESIZE_TARGET_OCPUS=2
+RESIZE_TARGET_MEMORY_GB=12
+```
+
+### Resize-Only Operating Mode Characteristics
+- **Strict Isolation**: Submits APPLY jobs **ONLY** to `RESIZE_STACK_OCID`. Zero execution path can call create/apply on any other stack (AD1, AD2, `purgatory03-ad3e`, etc.).
+- **No Capacity Prechecks**: Skips `CreateComputeCapacityReport` calls to attempt actual RM APPLY jobs directly each cycle.
+- **Consumed Stack Exception**: Authorizes `RESIZE_STACK_OCID` even if its OCID appears in `successful_stack_ocids`.
+- **No Fallback**: Out of Host Capacity errors leave the existing VM intact and retry on future cycles without attempting secondary stacks or ADs.
+- **Completion Check**: Once OCI Compute API confirms the instance shape reaches or exceeds `RESIZE_TARGET_OCPUS` (2) and `RESIZE_TARGET_MEMORY_GB` (12), provisioning marks complete (`COMPLETE.json`) and halts future mutations.
 
 ---
 
@@ -257,11 +283,15 @@ sudo oci-a1-launcherctl doctor
 sudo oci-a1-launcherctl candidates
 sudo oci-a1-launcherctl plan
 
+# Inspect resize-only mode status, target instance, stack, active jobs, and next action (Read-Only)
+sudo oci-a1-launcherctl resize-plan
+
 # Send a test email to verify SMTP configuration
 sudo oci-a1-launcherctl test-email
 
 # Execute one manual launcher run cycle
 sudo oci-a1-launcherctl run
+
 
 # View current launcher state, pause status, completion marker, and throttle status
 sudo oci-a1-launcherctl status

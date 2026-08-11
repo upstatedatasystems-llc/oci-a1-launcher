@@ -1,4 +1,4 @@
-"""Regression unit tests for OCI A1 Launcher v1.2.2 CLI dispatch and stack selection logic."""
+"""Regression unit tests for OCI A1 Launcher v1.3.0 CLI dispatch, stack selection, and RESIZE_ONLY mode."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from launcher import (
 )
 
 
-class TestLauncherV122(unittest.TestCase):
+class TestLauncherV130(unittest.TestCase):
     def setUp(self) -> None:
         self._orig_env = dict(os.environ)
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -230,6 +230,7 @@ class TestLauncherV122(unittest.TestCase):
             ret = launcher.print_status()
             self.assertEqual(ret, 0)
             out = fake_out.getvalue()
+            self.assertIn("Provisioning Mode: STANDARD", out)
             self.assertIn('"next_ad_index": 0', out)
             self.assertIn("Paused: False", out)
             self.assertIn("Complete: False", out)
@@ -270,6 +271,10 @@ class TestLauncherV122(unittest.TestCase):
             self.assertEqual(launcher.main(), 0)
             mock_plan.assert_called_once()
 
+        with patch("sys.argv", ["launcher.py", "resize-plan"]), patch("launcher.print_resize_plan", return_value=0) as mock_rp:
+            self.assertEqual(launcher.main(), 0)
+            mock_rp.assert_called_once()
+
         with patch("sys.argv", ["launcher.py", "run"]), patch("launcher.run_once", return_value=0) as mock_run:
             self.assertEqual(launcher.main(), 0)
             mock_run.assert_called_once()
@@ -277,6 +282,295 @@ class TestLauncherV122(unittest.TestCase):
         with patch("sys.argv", ["launcher.py", "doctor"]), patch("launcher.doctor", return_value=0) as mock_doc:
             self.assertEqual(launcher.main(), 0)
             mock_doc.assert_called_once_with(False)
+
+    # =========================================================================
+    # v1.3.0 RESIZE_ONLY Operating Mode Regression Tests
+    # =========================================================================
+
+    @patch("launcher.create_oci_clients")
+    def test_v130_resize_only_submits_apply_only_to_resize_stack(self, mock_create_clients: MagicMock) -> None:
+        """1. RESIZE_ONLY with 1/6 target instance submits APPLY only against RESIZE_STACK_OCID."""
+        mock_compute = MagicMock()
+        mock_rm = MagicMock()
+        mock_create_clients.return_value = (mock_compute, mock_rm)
+
+        os.environ["PROVISIONING_MODE"] = "RESIZE_ONLY"
+        os.environ["RESIZE_INSTANCE_OCID"] = "ocid1.instance.purgatory02"
+        os.environ["RESIZE_STACK_OCID"] = "ocid1.ormstack.purgatory02_ad3e"
+        os.environ["RESIZE_TARGET_OCPUS"] = "2"
+        os.environ["RESIZE_TARGET_MEMORY_GB"] = "12"
+        os.environ["COMPARTMENT_OCID"] = "ocid1.tenancy.oc1..test"
+        os.environ["CONTROL_INSTANCE_OCID"] = "ocid1.instance.control"
+
+        mock_inst = MagicMock()
+        mock_inst.id = "ocid1.instance.purgatory02"
+        mock_inst.display_name = "purgatory02"
+        mock_inst.shape = "VM.Standard.A1.Flex"
+        mock_inst.shape_config.ocpus = 1.0
+        mock_inst.shape_config.memory_in_gbs = 6.0
+        mock_inst.availability_domain = "US-ASHBURN-AD-3"
+        mock_inst.lifecycle_state = "RUNNING"
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.lifecycle_state = "RUNNING"
+        mock_compute.get_instance.side_effect = lambda ocid: MagicMock(data=mock_ctrl) if ocid == "ocid1.instance.control" else MagicMock(data=mock_inst)
+
+        mock_rm.list_jobs.return_value.data = []
+
+        mock_job = MagicMock()
+        mock_job.id = "ocid1.ormjob.apply1"
+        mock_job.lifecycle_state = "SUCCEEDED"
+        mock_rm.create_job.return_value.data = mock_job
+        mock_rm.get_job.return_value.data = mock_job
+        mock_rm.get_job_logs.return_value.data = []
+
+        with patch("launcher.DRY_RUN", False):
+            ret = launcher.run_once()
+            self.assertEqual(ret, 0)
+            mock_rm.create_job.assert_called_once()
+            call_args = mock_rm.create_job.call_args.kwargs.get("create_job_details") or mock_rm.create_job.call_args[0][0]
+            self.assertEqual(call_args.stack_id, "ocid1.ormstack.purgatory02_ad3e")
+            self.assertEqual(call_args.operation, "APPLY")
+
+    @patch("launcher.create_oci_clients")
+    def test_v130_resize_stack_in_successful_stack_ocids_still_usable(self, mock_create_clients: MagicMock) -> None:
+        """2. A RESIZE_STACK_OCID present in successful_stack_ocids is still authorized and usable for resize."""
+        mock_compute = MagicMock()
+        mock_rm = MagicMock()
+        mock_create_clients.return_value = (mock_compute, mock_rm)
+
+        os.environ["PROVISIONING_MODE"] = "RESIZE_ONLY"
+        os.environ["RESIZE_INSTANCE_OCID"] = "ocid1.instance.purgatory02"
+        os.environ["RESIZE_STACK_OCID"] = "ocid1.ormstack.purgatory02_ad3e"
+        os.environ["COMPARTMENT_OCID"] = "ocid1.tenancy.oc1..test"
+        os.environ["CONTROL_INSTANCE_OCID"] = "ocid1.instance.control"
+
+        state = {
+            "next_ad_index": 0,
+            "successful_stack_ocids": ["ocid1.ormstack.purgatory02_ad3e"],
+            "successful_instance_ids": ["ocid1.instance.purgatory02"],
+        }
+        common.save_state(state)
+
+        mock_inst = MagicMock()
+        mock_inst.id = "ocid1.instance.purgatory02"
+        mock_inst.shape_config.ocpus = 1.0
+        mock_inst.shape_config.memory_in_gbs = 6.0
+        mock_inst.lifecycle_state = "RUNNING"
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.lifecycle_state = "RUNNING"
+        mock_compute.get_instance.side_effect = lambda ocid: MagicMock(data=mock_ctrl) if ocid == "ocid1.instance.control" else MagicMock(data=mock_inst)
+
+        mock_rm.list_jobs.return_value.data = []
+        mock_job = MagicMock()
+        mock_job.id = "ocid1.ormjob.apply2"
+        mock_job.lifecycle_state = "SUCCEEDED"
+        mock_rm.create_job.return_value.data = mock_job
+        mock_rm.get_job.return_value.data = mock_job
+        mock_rm.get_job_logs.return_value.data = []
+
+        with patch("launcher.DRY_RUN", False):
+            ret = launcher.run_once()
+            self.assertEqual(ret, 0)
+            mock_rm.create_job.assert_called_once()
+            call_args = mock_rm.create_job.call_args.kwargs.get("create_job_details") or mock_rm.create_job.call_args[0][0]
+            self.assertEqual(call_args.stack_id, "ocid1.ormstack.purgatory02_ad3e")
+
+    @patch("launcher.create_oci_clients")
+    def test_v130_out_of_host_capacity_no_fallback(self, mock_create_clients: MagicMock) -> None:
+        """3 & 4. Out-of-host-capacity during resize causes NO fallback/new-instance submission to AD1/AD2/AD3 stacks."""
+        mock_compute = MagicMock()
+        mock_rm = MagicMock()
+        mock_create_clients.return_value = (mock_compute, mock_rm)
+
+        os.environ["PROVISIONING_MODE"] = "RESIZE_ONLY"
+        os.environ["RESIZE_INSTANCE_OCID"] = "ocid1.instance.purgatory02"
+        os.environ["RESIZE_STACK_OCID"] = "ocid1.ormstack.purgatory02_ad3e"
+        os.environ["COMPARTMENT_OCID"] = "ocid1.tenancy.oc1..test"
+        os.environ["CONTROL_INSTANCE_OCID"] = "ocid1.instance.control"
+
+        mock_inst = MagicMock()
+        mock_inst.id = "ocid1.instance.purgatory02"
+        mock_inst.shape_config.ocpus = 1.0
+        mock_inst.shape_config.memory_in_gbs = 6.0
+        mock_inst.lifecycle_state = "RUNNING"
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.lifecycle_state = "RUNNING"
+        mock_compute.get_instance.side_effect = lambda ocid: MagicMock(data=mock_ctrl) if ocid == "ocid1.instance.control" else MagicMock(data=mock_inst)
+
+        mock_rm.list_jobs.return_value.data = []
+
+        mock_job = MagicMock()
+        mock_job.id = "ocid1.ormjob.apply_failed"
+        mock_job.lifecycle_state = "FAILED"
+        mock_rm.create_job.return_value.data = mock_job
+        mock_rm.get_job.return_value.data = mock_job
+        log_entry = MagicMock()
+        log_entry.message = "Out of host capacity for shape VM.Standard.A1.Flex"
+        mock_rm.get_job_logs.return_value.data = [log_entry]
+
+        with patch("launcher.DRY_RUN", False):
+            ret = launcher.run_once()
+            self.assertEqual(ret, 0)
+            self.assertEqual(mock_rm.create_job.call_count, 1)
+
+    @patch("launcher.create_oci_clients")
+    def test_v130_target_reached_marks_complete_no_apply(self, mock_create_clients: MagicMock) -> None:
+        """5. Existing instance at 2/12 results in COMPLETE and no APPLY."""
+        mock_compute = MagicMock()
+        mock_rm = MagicMock()
+        mock_create_clients.return_value = (mock_compute, mock_rm)
+
+        os.environ["PROVISIONING_MODE"] = "RESIZE_ONLY"
+        os.environ["RESIZE_INSTANCE_OCID"] = "ocid1.instance.purgatory02"
+        os.environ["RESIZE_STACK_OCID"] = "ocid1.ormstack.purgatory02_ad3e"
+        os.environ["COMPARTMENT_OCID"] = "ocid1.tenancy.oc1..test"
+        os.environ["CONTROL_INSTANCE_OCID"] = "ocid1.instance.control"
+
+        mock_inst = MagicMock()
+        mock_inst.id = "ocid1.instance.purgatory02"
+        mock_inst.display_name = "purgatory02"
+        mock_inst.shape = "VM.Standard.A1.Flex"
+        mock_inst.shape_config.ocpus = 2.0
+        mock_inst.shape_config.memory_in_gbs = 12.0
+        mock_inst.availability_domain = "US-ASHBURN-AD-3"
+        mock_inst.time_created = None
+        mock_inst.lifecycle_state = "RUNNING"
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.lifecycle_state = "RUNNING"
+        mock_compute.get_instance.side_effect = lambda ocid: MagicMock(data=mock_ctrl) if ocid == "ocid1.instance.control" else MagicMock(data=mock_inst)
+
+        with patch("launcher.DRY_RUN", False):
+            ret = launcher.run_once()
+            self.assertEqual(ret, 0)
+            mock_rm.create_job.assert_not_called()
+            self.assertTrue(common.COMPLETE_FILE.exists())
+
+    @patch("launcher.create_oci_clients")
+    def test_v130_active_job_prevents_duplicate_submission(self, mock_create_clients: MagicMock) -> None:
+        """7. Active APPLY job prevents duplicate concurrent submission."""
+        mock_compute = MagicMock()
+        mock_rm = MagicMock()
+        mock_create_clients.return_value = (mock_compute, mock_rm)
+
+        os.environ["PROVISIONING_MODE"] = "RESIZE_ONLY"
+        os.environ["RESIZE_INSTANCE_OCID"] = "ocid1.instance.purgatory02"
+        os.environ["RESIZE_STACK_OCID"] = "ocid1.ormstack.purgatory02_ad3e"
+        os.environ["COMPARTMENT_OCID"] = "ocid1.tenancy.oc1..test"
+        os.environ["CONTROL_INSTANCE_OCID"] = "ocid1.instance.control"
+
+        mock_inst = MagicMock()
+        mock_inst.shape_config.ocpus = 1.0
+        mock_inst.shape_config.memory_in_gbs = 6.0
+        mock_inst.lifecycle_state = "RUNNING"
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.lifecycle_state = "RUNNING"
+        mock_compute.get_instance.side_effect = lambda ocid: MagicMock(data=mock_ctrl) if ocid == "ocid1.instance.control" else MagicMock(data=mock_inst)
+
+        active_job = MagicMock()
+        active_job.stack_id = "ocid1.ormstack.purgatory02_ad3e"
+        active_job.id = "ocid1.ormjob.in_progress"
+        active_job.lifecycle_state = "IN_PROGRESS"
+        mock_rm.list_jobs.return_value.data = [active_job]
+
+        with patch("launcher.DRY_RUN", False):
+            ret = launcher.run_once()
+            self.assertEqual(ret, 0)
+            mock_rm.create_job.assert_not_called()
+
+    @patch("launcher.create_oci_clients")
+    def test_v130_dry_run_submits_nothing(self, mock_create_clients: MagicMock) -> None:
+        """8. DRY_RUN=true submits nothing."""
+        mock_compute = MagicMock()
+        mock_rm = MagicMock()
+        mock_create_clients.return_value = (mock_compute, mock_rm)
+
+        os.environ["PROVISIONING_MODE"] = "RESIZE_ONLY"
+        os.environ["RESIZE_INSTANCE_OCID"] = "ocid1.instance.purgatory02"
+        os.environ["RESIZE_STACK_OCID"] = "ocid1.ormstack.purgatory02_ad3e"
+        os.environ["COMPARTMENT_OCID"] = "ocid1.tenancy.oc1..test"
+        os.environ["CONTROL_INSTANCE_OCID"] = "ocid1.instance.control"
+
+        mock_inst = MagicMock()
+        mock_inst.shape_config.ocpus = 1.0
+        mock_inst.shape_config.memory_in_gbs = 6.0
+        mock_inst.lifecycle_state = "RUNNING"
+
+        mock_ctrl = MagicMock()
+        mock_ctrl.lifecycle_state = "RUNNING"
+        mock_compute.get_instance.side_effect = lambda ocid: MagicMock(data=mock_ctrl) if ocid == "ocid1.instance.control" else MagicMock(data=mock_inst)
+        mock_rm.list_jobs.return_value.data = []
+
+        with patch("launcher.DRY_RUN", True):
+            ret = launcher.run_once()
+            self.assertEqual(ret, 0)
+            mock_rm.create_job.assert_not_called()
+
+    @patch("launcher.create_oci_clients")
+    def test_v130_resize_plan_is_read_only(self, mock_create_clients: MagicMock) -> None:
+        """9 & 11. resize-plan is strictly read-only and calls NO capacity report API."""
+        mock_compute = MagicMock()
+        mock_rm = MagicMock()
+        mock_create_clients.return_value = (mock_compute, mock_rm)
+
+        os.environ["PROVISIONING_MODE"] = "RESIZE_ONLY"
+        os.environ["RESIZE_INSTANCE_OCID"] = "ocid1.instance.purgatory02"
+        os.environ["RESIZE_STACK_OCID"] = "ocid1.ormstack.purgatory02_ad3e"
+        os.environ["COMPARTMENT_OCID"] = "ocid1.tenancy.oc1..test"
+        os.environ["CONTROL_INSTANCE_OCID"] = "ocid1.instance.control"
+
+        mock_inst = MagicMock()
+        mock_inst.display_name = "purgatory02"
+        mock_inst.shape_config.ocpus = 1.0
+        mock_inst.shape_config.memory_in_gbs = 6.0
+        mock_compute.get_instance.return_value.data = mock_inst
+
+        mock_stk = MagicMock()
+        mock_stk.display_name = "purgatory02-ad3e"
+        mock_rm.get_stack.return_value.data = mock_stk
+        mock_rm.list_jobs.return_value.data = []
+
+        plan = launcher.get_resize_plan()
+        self.assertEqual(plan["mode"], "RESIZE_ONLY")
+        self.assertTrue(plan["is_configured"])
+        self.assertFalse(plan["complete"])
+        self.assertEqual(plan["instance"]["ocpus"], 1.0)
+        self.assertEqual(plan["target_shape"]["ocpus"], 2.0)
+
+        # Confirm NO mutating calls or capacity report calls were made
+        mock_rm.create_job.assert_not_called()
+        mock_compute.create_compute_capacity_report.assert_not_called()
+
+        # Confirm print_resize_plan executes cleanly
+        with patch("sys.stdout", new=io.StringIO()) as fake_out:
+            ret = launcher.print_resize_plan()
+            self.assertEqual(ret, 0)
+            out = fake_out.getvalue()
+            self.assertIn("Provisioning Mode: RESIZE_ONLY", out)
+            self.assertIn("Target:  2 OCPU / 12 GB RAM", out)
+
+    def test_v130_missing_or_placeholder_config_fails_safe(self) -> None:
+        """10. Missing/placeholder RESIZE_* settings fail safe."""
+        os.environ["PROVISIONING_MODE"] = "RESIZE_ONLY"
+        os.environ["RESIZE_INSTANCE_OCID"] = "REPLACE_WITH_EXISTING_INSTANCE_OCID"
+        os.environ["RESIZE_STACK_OCID"] = "REPLACE_WITH_EXISTING_STACK_OCID"
+
+        cfg = common.get_resize_config()
+        self.assertFalse(cfg["is_configured"])
+
+        with patch("sys.stdout", new=io.StringIO()) as fake_out:
+            ret = launcher.doctor(False)
+            self.assertEqual(ret, 1)
+            out = fake_out.getvalue()
+            self.assertIn("ERROR: PROVISIONING_MODE=RESIZE_ONLY is set", out)
+
+        plan = launcher.get_resize_plan()
+        self.assertFalse(plan["is_configured"])
+        self.assertIn("FAILSAFE", plan["status_text"])
 
 
 if __name__ == "__main__":
