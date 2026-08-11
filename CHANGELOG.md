@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1
+
+- Fixes test isolation in `tests/test_launcher.py` by centralizing automatic test setup in an isolated temporary workspace directory.
+- Ensures all unit tests run hermetically without requiring root privileges, sudo access, or touching production paths (`/var/lib/oci-a1-launcher` or `/etc/oci-a1-launcher`).
+- Adds explicit regression test verifying that test execution completes cleanly without permission errors even when default production paths are inaccessible.
+
 ## 1.2.0
 
 - Adds support for additional 1 OCPU / 6 GB ("E"/small-stack) Resource Manager stacks via `EXTRA_SMALL_STACKS_JSON`.

@@ -1,15 +1,19 @@
-"""Regression unit tests for OCI A1 Launcher v1.2.0 stack selection and candidate plan logic."""
+"""Regression unit tests for OCI A1 Launcher v1.2.1 hermetic test isolation and stack selection logic."""
 
 from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # Ensure src/ directory is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
+import common
+import launcher
 from common import (
     StackSpec,
     classify_a1_instances,
@@ -24,11 +28,34 @@ from launcher import (
 )
 
 
-class TestLauncherV120(unittest.TestCase):
+class TestLauncherV121(unittest.TestCase):
     def setUp(self) -> None:
         self._orig_env = dict(os.environ)
+        self.temp_dir = tempfile.TemporaryDirectory()
+        temp_path = Path(self.temp_dir.name)
+
+        os.environ["DATA_DIR"] = str(temp_path)
+        os.environ["HOME"] = str(temp_path)
+
+        self._patchers = [
+            patch("common.DATA_DIR", temp_path),
+            patch("common.STATE_FILE", temp_path / "state.json"),
+            patch("common.EVENT_FILE", temp_path / "events.jsonl"),
+            patch("common.LOCK_FILE", temp_path / "launcher.lock"),
+            patch("common.PAUSE_FILE", temp_path / "PAUSED"),
+            patch("common.COMPLETE_FILE", temp_path / "COMPLETE.json"),
+            patch("common.THROTTLE_FILE", temp_path / "THROTTLED.json"),
+            patch("launcher.PAUSE_FILE", temp_path / "PAUSED"),
+            patch("launcher.COMPLETE_FILE", temp_path / "COMPLETE.json"),
+            patch("launcher.THROTTLE_FILE", temp_path / "THROTTLED.json"),
+        ]
+        for p in self._patchers:
+            p.start()
 
     def tearDown(self) -> None:
+        for p in reversed(self._patchers):
+            p.stop()
+        self.temp_dir.cleanup()
         os.environ.clear()
         os.environ.update(self._orig_env)
 
@@ -170,6 +197,30 @@ class TestLauncherV120(unittest.TestCase):
 
             mock_rm.create_job.assert_not_called()
             mock_rm.change_stack_compartment.assert_not_called()
+
+    @patch("launcher.create_oci_clients")
+    def test_hermetic_isolation_with_inaccessible_production_data_dir(
+        self, mock_create_clients: MagicMock
+    ) -> None:
+        """Regression Test: Suite operates cleanly without permission errors even if production /var/lib/oci-a1-launcher is inaccessible."""
+        mock_compute = MagicMock()
+        mock_rm = MagicMock()
+        mock_create_clients.return_value = (mock_compute, mock_rm)
+
+        os.environ["STACK_OCID_AD1"] = "ocid1.ormstack.ad1"
+        os.environ["STACK_OCID_AD1E"] = "ocid1.ormstack.ad1e"
+        os.environ["STACK_OCID_AD2"] = "ocid1.ormstack.ad2"
+        os.environ["STACK_OCID_AD2E"] = "ocid1.ormstack.ad2e"
+        os.environ["STACK_OCID_AD3"] = "ocid1.ormstack.ad3"
+        os.environ["STACK_OCID_AD3E"] = "ocid1.ormstack.ad3e"
+
+        # Verify that get_candidate_plan reads from the isolated temp_dir patched in setUp,
+        # without raising PermissionError or touching root-only production paths.
+        with patch("common.STACKS", load_stacks()):
+            plan = get_candidate_plan()
+            self.assertIn("paused", plan)
+            self.assertFalse(plan["paused"])
+            self.assertIn("all_stacks", plan)
 
 
 if __name__ == "__main__":
