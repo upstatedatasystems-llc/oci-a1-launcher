@@ -9,4 +9,6 @@
 - Changes the second-stack delay from 300 seconds to 600 seconds.
 - Moves the previous-day report from 8:00 AM to 7:50 AM America/New_York.
 - Adds throttle entries and counts to the daily report.
+- Decouples stack OCIDs and control server OCIDs from source code into environment configuration (`STACK_OCID_AD1` through `STACK_OCID_AD3E` or `STACK_OCIDS` JSON map).
+- Hardens `upgrade.sh` to safely append newly required stack OCID environment keys and pause live provisioning until populated.
 - Adds `upgrade.sh` to preserve configuration, state, and logs during an in-place upgrade.

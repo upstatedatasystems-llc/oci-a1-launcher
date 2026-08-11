@@ -22,6 +22,7 @@ Automated, resilient provisioning for Oracle Cloud Infrastructure (OCI) Always F
 - [Upgrade Procedure](#upgrade-procedure)
 - [Disabling and Uninstalling](#disabling-and-uninstalling)
 - [Security Considerations](#security-considerations)
+- [License](#license)
 
 ---
 
@@ -99,33 +100,46 @@ The launcher expects six pre-created OCI Resource Manager Terraform stacks. Thei
 
 ## Installation on Ubuntu Control Instance
 
-1. **Copy Source Files to Control Server**:
-   ```bash
-   scp -i /path/to/ssh-key oci-a1-launcher-v1.1.0.zip ubuntu@CONTROL_SERVER_IP:/home/ubuntu/
-   ```
+### Primary Path: Clone from GitHub
 
-2. **Extract and Run Installer**:
+1. Connect to your control server via SSH:
    ```bash
    ssh -i /path/to/ssh-key ubuntu@CONTROL_SERVER_IP
-   unzip oci-a1-launcher-v1.1.0.zip
+   ```
+
+2. Clone the repository and run the installer:
+   ```bash
+   git clone https://github.com/upstatedatasystems-llc/oci-a1-launcher.git
    cd oci-a1-launcher
    sudo bash install.sh
    ```
-   The installer creates `/opt/oci-a1-launcher`, builds a Python virtual environment, places default systemd units, and sets up `/etc/oci-a1-launcher/launcher.env`.
 
-3. **Configure Environment Variables**:
+### Optional Alternative: Download Release Archive
+
+Alternatively, download and extract a release `.zip` or `.tar.gz` from the GitHub Releases page:
+```bash
+wget https://github.com/upstatedatasystems-llc/oci-a1-launcher/archive/refs/tags/v1.1.0.tar.gz
+tar -xzf v1.1.0.tar.gz
+cd oci-a1-launcher-1.1.0
+sudo bash install.sh
+```
+
+### Post-Installation Configuration
+
+1. **Configure Environment Variables**:
    ```bash
    sudo nano /etc/oci-a1-launcher/launcher.env
    sudo chmod 0600 /etc/oci-a1-launcher/launcher.env
    ```
+   Populate `COMPARTMENT_OCID`, `CONTROL_INSTANCE_OCID`, `SMTP_USER`, `SMTP_APP_PASSWORD`, and the six `STACK_OCID_*` variables.
 
-4. **Validate Access & Configuration**:
+2. **Validate Access & Configuration**:
    ```bash
    sudo oci-a1-launcherctl doctor
    sudo oci-a1-launcherctl test-email
    ```
 
-5. **Enable Systemd Timers**:
+3. **Enable Systemd Timers**:
    ```bash
    sudo oci-a1-launcherctl start
    ```
@@ -252,16 +266,25 @@ To upgrade an existing deployment using `upgrade.sh`:
    ```bash
    sudo oci-a1-launcherctl pause
    ```
-2. Extract the new release zip into a directory and run:
+2. Fetch the latest code (`git pull` or extract new release archive) and run:
    ```bash
    sudo bash upgrade.sh
    ```
-   `upgrade.sh` safely backs up existing configuration and state to `/var/backups/oci-a1-launcher`, copies updated source code and systemd units, updates new configuration variables, reloads systemd, and restores timer states.
-3. Validate and resume:
+   `upgrade.sh` safely creates a root-only backup under `/var/backups/oci-a1-launcher`, updates binaries and systemd definitions, preserves existing credentials in `/etc/oci-a1-launcher/launcher.env`, and appends placeholders for any newly required variables (`STACK_OCID_AD1` through `STACK_OCID_AD3E`).
+
+3. **Populate Stack OCIDs (Migration Step for v1.1.0+)**:
+   If upgrading from a version where stack OCIDs were hardcoded in python source, edit `/etc/oci-a1-launcher/launcher.env`:
+   ```bash
+   sudo nano /etc/oci-a1-launcher/launcher.env
+   ```
+   Set your six Resource Manager stack OCIDs (`STACK_OCID_AD1` through `STACK_OCID_AD3E` or `STACK_OCIDS`).
+
+4. **Validate and Resume**:
    ```bash
    sudo oci-a1-launcherctl doctor
    sudo oci-a1-launcherctl resume
    ```
+   *(The launcher timer remains safely paused and disabled after upgrade until valid stack OCIDs are configured and `resume` is executed).*
 
 ---
 
@@ -301,3 +324,10 @@ sudo rm -f /usr/local/sbin/oci-a1-launcherctl
 2. **File Permissions**: The environment file `/etc/oci-a1-launcher/launcher.env` contains the SMTP password and is restricted to `0600` (root read/write only). The runtime data directory `/var/lib/oci-a1-launcher` is restricted to `0700`.
 3. **IAM Scoping**: IAM policies permit only `APPLY` Resource Manager operations. No `DESTROY` or deletion operations are permitted to the dynamic group.
 4. **Google App Passwords**: SMTP integration uses dedicated 16-character Google App Passwords rather than primary Google account credentials.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+Copyright (c) 2026 Upstate Data Systems LLC.
