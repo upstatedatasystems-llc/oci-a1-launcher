@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0
+
+- Adds support for additional 1 OCPU / 6 GB ("E"/small-stack) Resource Manager stacks via `EXTRA_SMALL_STACKS_JSON`.
+- Changes small-stack selection so an Availability Domain is not rejected merely because an A1 instance already exists in that AD.
+- Preserves exact consumed stack OCID exclusions (`successful_stack_ocids`) so previously succeeded Terraform-managed stacks are never re-applied.
+- Validates additional stack configurations against duplicate stack names, duplicate OCIDs, invalid AD numbers, and malformed JSON.
+- Adds read-only `candidates` (and `plan`) diagnostic command to `launcherctl` (`sudo oci-a1-launcherctl candidates`) to inspect inventory, rotation, and stack eligibility without modifying resources.
+- Adds comprehensive regression unit test suite (`tests/test_launcher.py`).
+- Updates `upgrade.sh` to safely append `EXTRA_SMALL_STACKS_JSON` and maintain backward compatibility for existing v1.1.0 installations.
+
 ## 1.1.0
 
 - Reduces active-job checks from six per scan to one compartment-wide Resource Manager request.

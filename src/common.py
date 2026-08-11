@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
 import json
 import os
 import smtplib
@@ -18,9 +21,15 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence
 from zoneinfo import ZoneInfo
 
-import oci
+try:
+    import oci
+except ImportError:
+    oci = None  # type: ignore[assignment]
 
-LOCAL_TZ = ZoneInfo(os.getenv("LOCAL_TIMEZONE", "America/New_York"))
+try:
+    LOCAL_TZ = ZoneInfo(os.getenv("LOCAL_TIMEZONE", "America/New_York"))
+except Exception:
+    LOCAL_TZ = timezone.utc  # type: ignore[assignment]
 REGION = os.getenv("OCI_REGION", "us-ashburn-1")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/var/lib/oci-a1-launcher"))
 STATE_FILE = DATA_DIR / "state.json"
@@ -63,17 +72,66 @@ DEFAULT_STACK_METADATA: tuple[dict[str, Any], ...] = (
 )
 
 
+def parse_extra_small_stacks(env_val: str) -> list[dict[str, Any]]:
+    """Parse and validate EXTRA_SMALL_STACKS_JSON or EXTRA_SMALL_STACKS env var."""
+    if not env_val or not env_val.strip():
+        return []
+    try:
+        data = json.loads(env_val)
+    except Exception as exc:
+        raise ValueError(f"Invalid JSON in EXTRA_SMALL_STACKS_JSON: {exc}") from exc
+
+    if not isinstance(data, list):
+        raise ValueError("EXTRA_SMALL_STACKS_JSON must be a JSON array of objects")
+
+    parsed: list[dict[str, Any]] = []
+    for idx, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise ValueError(f"EXTRA_SMALL_STACKS_JSON entry #{idx+1} is not a JSON object")
+        name = str(item.get("name", "")).strip()
+        ocid = str(item.get("ocid", "")).strip()
+        ad_val = item.get("ad")
+
+        if not name:
+            raise ValueError(f"EXTRA_SMALL_STACKS_JSON entry #{idx+1} is missing 'name'")
+        if not ocid:
+            raise ValueError(f"EXTRA_SMALL_STACKS_JSON entry #{idx+1} ('{name}') is missing 'ocid'")
+        try:
+            ad = int(ad_val)
+        except (TypeError, ValueError):
+            raise ValueError(f"EXTRA_SMALL_STACKS_JSON entry '{name}' has invalid 'ad': {ad_val}")
+
+        if ad not in (1, 2, 3):
+            raise ValueError(
+                f"EXTRA_SMALL_STACKS_JSON entry '{name}' has invalid Availability Domain: {ad}. Must be 1, 2, or 3."
+            )
+
+        parsed.append(
+            {
+                "name": name,
+                "ocid": ocid,
+                "ad": ad,
+                "ocpus": 1.0,
+                "memory_gb": 6.0,
+            }
+        )
+    return parsed
+
+
 def load_stacks() -> tuple[StackSpec, ...]:
-    """Load StackSpec objects dynamically from environment variables."""
+    """Load StackSpec objects dynamically from environment variables and validate uniqueness."""
     json_raw = os.getenv("STACK_OCIDS", "").strip()
     json_map: dict[str, str] = {}
     if json_raw:
         try:
             json_map = json.loads(json_raw)
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in STACK_OCIDS: {exc}") from exc
 
     stacks: list[StackSpec] = []
+    seen_names: set[str] = set()
+    seen_ocids: set[str] = set()
+
     for spec in DEFAULT_STACK_METADATA:
         name = spec["name"]
         env_var = spec["env_var"]
@@ -82,6 +140,15 @@ def load_stacks() -> tuple[StackSpec, ...]:
             or json_map.get(name, "").strip()
             or json_map.get(env_var, "").strip()
         )
+        if name in seen_names:
+            raise ValueError(f"Duplicate stack name detected: {name}")
+        seen_names.add(name)
+
+        if ocid:
+            if ocid in seen_ocids:
+                raise ValueError(f"Duplicate stack OCID detected across configuration: {ocid}")
+            seen_ocids.add(ocid)
+
         stacks.append(
             StackSpec(
                 name=name,
@@ -91,6 +158,32 @@ def load_stacks() -> tuple[StackSpec, ...]:
                 memory_gb=float(spec["memory_gb"]),
             )
         )
+
+    extra_json = os.getenv("EXTRA_SMALL_STACKS_JSON", "").strip() or os.getenv("EXTRA_SMALL_STACKS", "").strip()
+    if extra_json:
+        extra_specs = parse_extra_small_stacks(extra_json)
+        for spec in extra_specs:
+            name = spec["name"]
+            ocid = spec["ocid"]
+            if name in seen_names:
+                raise ValueError(f"Duplicate stack name detected in extra small stacks: {name}")
+            seen_names.add(name)
+
+            if ocid:
+                if ocid in seen_ocids:
+                    raise ValueError(f"Duplicate stack OCID detected in extra small stacks: {ocid}")
+                seen_ocids.add(ocid)
+
+            stacks.append(
+                StackSpec(
+                    name=name,
+                    ocid=ocid,
+                    ad=spec["ad"],
+                    ocpus=spec["ocpus"],
+                    memory_gb=spec["memory_gb"],
+                )
+            )
+
     return tuple(stacks)
 
 
@@ -128,6 +221,9 @@ def ensure_data_dir() -> None:
 def exclusive_lock(blocking: bool) -> Iterator[bool]:
     """Acquire the shared launcher/report lock."""
     ensure_data_dir()
+    if fcntl is None:
+        yield True
+        return
     with LOCK_FILE.open("a+", encoding="utf-8") as handle:
         flags = fcntl.LOCK_EX
         if not blocking:

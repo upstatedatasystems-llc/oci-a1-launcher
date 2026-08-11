@@ -69,6 +69,9 @@ append_env_key_if_missing STACK_OCID_AD2E "REPLACE_WITH_STACK_OCID_AD2E"
 append_env_key_if_missing STACK_OCID_AD3 "REPLACE_WITH_STACK_OCID_AD3"
 append_env_key_if_missing STACK_OCID_AD3E "REPLACE_WITH_STACK_OCID_AD3E"
 
+# Safely append default for optional extra small stacks (v1.2.0+)
+append_env_key_if_missing EXTRA_SMALL_STACKS_JSON "[]" "Optional additional 1 OCPU / 6 GB stacks (v1.2.0+)"
+
 chmod 0600 "$CONFIG"
 
 systemctl daemon-reload

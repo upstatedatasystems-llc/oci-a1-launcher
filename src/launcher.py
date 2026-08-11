@@ -13,7 +13,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
-import oci
+try:
+    import oci
+except ImportError:
+    oci = None  # type: ignore[assignment]
 
 from common import (
     ACTIVE_JOB_STATES,
@@ -44,8 +47,8 @@ from common import (
     utc_iso,
 )
 
-COMPARTMENT_OCID = get_env_required("COMPARTMENT_OCID")
-CONTROL_INSTANCE_OCID = get_env_required("CONTROL_INSTANCE_OCID")
+COMPARTMENT_OCID = os.getenv("COMPARTMENT_OCID", "").strip()
+CONTROL_INSTANCE_OCID = os.getenv("CONTROL_INSTANCE_OCID", "").strip()
 CONTROL_INSTANCE_NAME = os.getenv("CONTROL_INSTANCE_NAME", "purgatory01-vm").strip()
 JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "1200"))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "20"))
@@ -432,21 +435,24 @@ def choose_small_stack(
     preferred_ad: int | None = None,
 ) -> StackSpec:
     used_stack_ocids = set(state.get("successful_stack_ocids", []))
-    existing_ads = {infer_ad_number(item.get("availability_domain")) for item in existing_small}
-    existing_ads.discard(None)
     rotation = [((int(state.get("next_ad_index", 0)) + offset) % 3) + 1 for offset in range(3)]
     if preferred_ad in (1, 2, 3):
         rotation = [preferred_ad] + [ad for ad in rotation if ad != preferred_ad]
 
-    candidates = [stack for stack in STACKS if stack.ocpus == 1 and stack.ocid not in used_stack_ocids]
-    # Prefer a different AD from the existing 1/6 VM, then follow rotation.
-    for avoid_existing_ad in (True, False):
-        for ad in rotation:
-            if avoid_existing_ad and ad in existing_ads:
-                continue
-            for stack in candidates:
-                if stack.ad == ad:
-                    return stack
+    candidates = [
+        stack for stack in STACKS
+        if stack.ocpus == 1
+        and stack.ocid
+        and stack.ocid not in used_stack_ocids
+        and "example" not in stack.ocid.lower()
+        and "replace" not in stack.ocid.lower()
+    ]
+
+    for ad in rotation:
+        for stack in candidates:
+            if stack.ad == ad:
+                return stack
+
     raise RuntimeError("No eligible 1 OCPU / 6 GB stack remains")
 
 
@@ -505,6 +511,9 @@ def run_once() -> int:
                 }
             )
             return 1
+
+        get_env_required("COMPARTMENT_OCID")
+        get_env_required("CONTROL_INSTANCE_OCID")
 
         state = load_state()
         append_event({"event_type": "run_start", "run_id": run_id, "dry_run": DRY_RUN})
@@ -721,19 +730,155 @@ def doctor(send_test: bool) -> int:
     return 0
 
 
-def print_status() -> int:
+def get_candidate_plan() -> dict[str, Any]:
+    """Inspect current state and inventory, returning candidate analysis without modifying anything."""
     state = load_state()
-    print(json.dumps(state, indent=2, sort_keys=True))
-    print(f"Paused: {PAUSE_FILE.exists()}")
-    print(f"Complete: {COMPLETE_FILE.exists()}")
-    cooldown = load_throttle_cooldown()
-    if cooldown:
-        until = cooldown["until_datetime"]
-        print(f"Throttled: True (until {local_timestamp(until)} / {utc_iso(until)})")
+    used_stack_ocids = set(state.get("successful_stack_ocids", []))
+
+    inventory_summary: dict[str, Any] = {"small": [], "large": [], "complete": False, "total": 0, "unexpected": []}
+    control_instance_status = "UNKNOWN"
+    active_jobs: list[dict[str, Any]] = []
+    oci_error: str | None = None
+
+    try:
+        compute, resource_manager = create_oci_clients()
+        try:
+            control = get_control_instance(compute)
+            control_instance_status = control.get("lifecycle_state", "UNKNOWN")
+        except Exception as exc:
+            control_instance_status = f"ERROR ({exc})"
+
+        try:
+            active_jobs = active_resource_manager_jobs(resource_manager)
+        except Exception as exc:
+            oci_error = f"Failed to list active RM jobs: {exc}"
+
+        try:
+            a1_instances = list_a1_instances(compute)
+            inventory_summary = classify_a1_instances(a1_instances)
+        except Exception as exc:
+            if not oci_error:
+                oci_error = f"Failed to list A1 instances: {exc}"
+    except Exception as exc:
+        oci_error = f"Failed to initialize OCI client: {exc}"
+
+    stack_details: list[dict[str, Any]] = []
+    eligible_large: list[dict[str, Any]] = []
+    eligible_small: list[dict[str, Any]] = []
+
+    rotation_index = int(state.get("next_ad_index", 0))
+    rotation_ad = rotation_index + 1
+
+    for stack in STACKS:
+        is_used = stack.ocid in used_stack_ocids
+        is_placeholder = not stack.ocid or "example" in stack.ocid.lower() or "replace" in stack.ocid.lower()
+
+        reasons_excluded: list[str] = []
+        if is_used:
+            reasons_excluded.append("ALREADY_SUCCESSFULLY_PROVISIONED (stack OCID in successful_stack_ocids)")
+        if is_placeholder:
+            reasons_excluded.append("UNCONFIGURED_OR_PLACEHOLDER_OCID")
+
+        is_eligible = len(reasons_excluded) == 0
+
+        detail = {
+            "name": stack.name,
+            "ocid": stack.ocid,
+            "ad": stack.ad,
+            "ocpus": stack.ocpus,
+            "memory_gb": stack.memory_gb,
+            "is_used": is_used,
+            "is_eligible": is_eligible,
+            "reasons_excluded": reasons_excluded,
+        }
+        stack_details.append(detail)
+
+        if is_eligible:
+            if stack.ocpus == 2:
+                eligible_large.append(detail)
+            elif stack.ocpus == 1:
+                eligible_small.append(detail)
+
+    ad_rotation = [((rotation_index + offset) % 3) + 1 for offset in range(3)]
+
+    next_large_candidate: dict[str, Any] | None = None
+    next_small_candidate: dict[str, Any] | None = None
+
+    for ad in ad_rotation:
+        if not next_large_candidate:
+            for s in eligible_large:
+                if s["ad"] == ad:
+                    next_large_candidate = s
+                    break
+        if not next_small_candidate:
+            for s in eligible_small:
+                if s["ad"] == ad:
+                    next_small_candidate = s
+                    break
+
+    return {
+        "paused": PAUSE_FILE.exists(),
+        "complete": COMPLETE_FILE.exists() or inventory_summary.get("complete", False),
+        "control_instance_status": control_instance_status,
+        "active_jobs": active_jobs,
+        "oci_error": oci_error,
+        "inventory": inventory_summary,
+        "next_ad_index": rotation_index,
+        "current_rotation_ad": rotation_ad,
+        "ad_rotation": ad_rotation,
+        "next_large_candidate": next_large_candidate,
+        "next_small_candidate": next_small_candidate,
+        "all_stacks": stack_details,
+        "eligible_large_stacks": [s["name"] for s in eligible_large],
+        "eligible_small_stacks": [s["name"] for s in eligible_small],
+        "consumed_stacks": [s["name"] for s in stack_details if s["is_used"]],
+    }
+
+
+def print_candidates() -> int:
+    plan = get_candidate_plan()
+    print("=== OCI A1 Launcher Candidate Plan (Read-Only) ===")
+    print(f"Paused: {plan['paused']}")
+    print(f"Complete: {plan['complete']}")
+    print(f"Control Instance Status: {plan['control_instance_status']}")
+    print(f"Current Rotation AD: AD-{plan['current_rotation_ad']} (next_ad_index={plan['next_ad_index']})")
+    print(f"AD Rotation Sequence: {plan['ad_rotation']}")
+    print()
+
+    if plan["oci_error"]:
+        print(f"NOTE: {plan['oci_error']}")
+        print()
+
+    print("--- Current A1 Inventory ---")
+    inv = plan["inventory"]
+    print(f"Total A1 Instances: {inv['total']} (Complete: {inv['complete']})")
+    for inst in inv.get("large", []):
+        print(f"  [2/12] {inst.get('display_name')} | {inst.get('availability_domain')} | {inst.get('id')}")
+    for inst in inv.get("small", []):
+        print(f"  [1/6]  {inst.get('display_name')} | {inst.get('availability_domain')} | {inst.get('id')}")
+    print()
+
+    print("--- Candidate Stacks Analysis ---")
+    for s in plan["all_stacks"]:
+        status = "CONSUMED" if s["is_used"] else ("ELIGIBLE" if s["is_eligible"] else "EXCLUDED")
+        ex_text = f" -> Excluded: {', '.join(s['reasons_excluded'])}" if s["reasons_excluded"] else ""
+        print(f"  [{status}] {s['name']} (AD-{s['ad']}, {s['ocpus']:g} OCPU / {s['memory_gb']:g} GB){ex_text}")
+    print()
+
+    print("--- Next Candidate Evaluation ---")
+    if plan["next_large_candidate"]:
+        nl = plan["next_large_candidate"]
+        print(f"  Next 2/12 candidate: {nl['name']} (AD-{nl['ad']})")
     else:
-        print("Throttled: False")
-    if COMPLETE_FILE.exists():
-        print(COMPLETE_FILE.read_text(encoding="utf-8"))
+        print("  Next 2/12 candidate: None eligible")
+
+    if plan["next_small_candidate"]:
+        ns = plan["next_small_candidate"]
+        print(f"  Next 1/6 candidate:  {ns['name']} (AD-{ns['ad']})")
+    else:
+        print("  Next 1/6 candidate:  None eligible")
+    print()
+    print("NOTE: This diagnostic command is strictly READ-ONLY. No jobs were submitted and no OCI resources were modified.")
     return 0
 
 
@@ -744,6 +889,8 @@ def main() -> int:
     doctor_parser = subparsers.add_parser("doctor", help="Validate OCI access and optional SMTP")
     doctor_parser.add_argument("--send-test-email", action="store_true")
     subparsers.add_parser("status", help="Print local launcher state")
+    subparsers.add_parser("candidates", help="Inspect candidate stack selection (read-only)")
+    subparsers.add_parser("plan", help="Inspect candidate stack selection (read-only)")
     args = parser.parse_args()
     if args.command == "run":
         return run_once()
@@ -751,6 +898,8 @@ def main() -> int:
         return doctor(args.send_test_email)
     if args.command == "status":
         return print_status()
+    if args.command in ("candidates", "plan"):
+        return print_candidates()
     return 2
 
 

@@ -10,6 +10,7 @@ Automated, resilient provisioning for Oracle Cloud Infrastructure (OCI) Always F
 - [OCI Prerequisites](#oci-prerequisites)
 - [OCI IAM Dynamic Group & Policy Setup](#oci-iam-dynamic-group--policy-setup)
 - [Expected Resource Manager Stacks](#expected-resource-manager-stacks)
+- [Additional Small-Stack Configuration (v1.2.0+)](#additional-small-stack-configuration-v120)
 - [Installation on Ubuntu Control Instance](#installation-on-ubuntu-control-instance)
 - [Configuration Reference](#configuration-reference)
 - [Systemd Integration & Provisioning Schedule](#systemd-integration--provisioning-schedule)
@@ -18,7 +19,7 @@ Automated, resilient provisioning for Oracle Cloud Infrastructure (OCI) Always F
   - [Throttling & 429 Cooldown Behavior](#throttling--429-cooldown-behavior)
   - [Daily 7:50 AM Email Report](#daily-750-am-email-report)
 - [Dry-Run Mode](#dry-run-mode)
-- [Administration & Management Commands](#administration--management-commands)
+- [Administration & Candidate Inspection Commands](#administration--candidate-inspection-commands)
 - [Upgrade Procedure](#upgrade-procedure)
 - [Disabling and Uninstalling](#disabling-and-uninstalling)
 - [Security Considerations](#security-considerations)
@@ -32,7 +33,8 @@ OCI Always Free Ampere A1 instances are frequently subject to "Out of Host Capac
 
 Key features:
 - **Instance Principal Authentication**: No static OCI user API keys or private keys are stored on disk. Authentication is bound directly to the control server's instance OCID via OCI IAM Dynamic Groups.
-- **Resilient Stack Rotation**: Continuously rotates across three Availability Domains (AD-1, AD-2, AD-3) attempting both 2 OCPU / 12 GB and 1 OCPU / 6 GB configurations until the maximum 4 OCPU / 24 GB allocation is full.
+- **Resilient Stack Rotation**: Continuously rotates across Availability Domains attempting both 2 OCPU / 12 GB and 1 OCPU / 6 GB configurations until the maximum 4 OCPU / 24 GB allocation is full.
+- **Same-AD Multi-Stack Support**: Supports multiple distinct 1 OCPU / 6 GB stacks per Availability Domain without reapplying previously succeeded Terraform-managed stacks.
 - **Throttling Protection**: Handles OCI HTTP 429 (`TooManyRequests`) rate limits gracefully by entering a 1-hour no-API cooldown period.
 - **Daily Status Reports**: Delivers a comprehensive email report every morning at 7:50 AM America/New_York detailing all provisioning attempts, errors, and inventory changes.
 - **Automatic Completion**: Automatically halts all provisioning API calls once the target A1 allocation is satisfied.
@@ -43,7 +45,7 @@ Key features:
 
 1. **OCI Tenancy**: An active Oracle Cloud Infrastructure account.
 2. **Ubuntu Control Server**: An active E2.1.Micro instance (e.g., `purgatory01-vm`) running 24/7 on Ubuntu 20.04/22.04/24.04 LTS.
-3. **Six Pre-configured Resource Manager Stacks**: Terraform stacks created in OCI Resource Manager corresponding to the 3 Availability Domains and 2 shape sizes (see [Expected Resource Manager Stacks](#expected-resource-manager-stacks)).
+3. **Pre-configured Resource Manager Stacks**: Terraform stacks created in OCI Resource Manager corresponding to the Availability Domains and shape sizes (see [Expected Resource Manager Stacks](#expected-resource-manager-stacks)).
 4. **Gmail SMTP Access**: A Gmail account (or alternative SMTP provider) with 2-Step Verification and a dedicated 16-character **App Password** for sending automated email updates.
 
 ---
@@ -83,7 +85,7 @@ In the OCI Console under **Identity & Security** > **Policies** (created in the 
 
 ## Expected Resource Manager Stacks
 
-The launcher expects six pre-created OCI Resource Manager Terraform stacks. Their OCIDs are configured via environment variables in `/etc/oci-a1-launcher/launcher.env`:
+The launcher expects primary OCI Resource Manager Terraform stacks whose OCIDs are configured in `/etc/oci-a1-launcher/launcher.env`:
 
 | Stack Name | AD | OCPUs | Memory (GB) | Environment Variable |
 | :--- | :---: | :---: | :---: | :--- |
@@ -94,7 +96,25 @@ The launcher expects six pre-created OCI Resource Manager Terraform stacks. Thei
 | `purgatory02-ad3` | 3 | 2 | 12 | `STACK_OCID_AD3` |
 | `purgatory02-ad3e` | 3 | 1 | 6 | `STACK_OCID_AD3E` |
 
-*(Alternatively, you can supply a single JSON map variable `STACK_OCIDS` containing `"stack-name": "ocid"` pairs).*
+---
+
+## Additional Small-Stack Configuration (v1.2.0+)
+
+If a 1 OCPU / 6 GB stack in a specific Availability Domain has already successfully provisioned an instance (e.g. `purgatory02-ad3e` in AD-3), that exact stack OCID is marked consumed and will not be re-applied.
+
+To allow future 1/6 provisioning attempts in that same AD, create an additional Resource Manager stack in OCI (e.g., `purgatory03-ad3e`) and configure it via `EXTRA_SMALL_STACKS_JSON`:
+
+```bash
+EXTRA_SMALL_STACKS_JSON='[
+  {
+    "name": "purgatory03-ad3e",
+    "ocid": "ocid1.ormstack.oc1.iad.examplepurgatory03ad3e",
+    "ad": 3
+  }
+]'
+```
+
+The launcher will evaluate both standard and extra small stacks, excluding consumed stack OCIDs while keeping all eligible unused 1/6 stacks available in AD rotation.
 
 ---
 
@@ -116,11 +136,11 @@ The launcher expects six pre-created OCI Resource Manager Terraform stacks. Thei
 
 ### Optional Alternative: Download Release Archive
 
-Alternatively, download and extract a release `.zip` or `.tar.gz` from the GitHub Releases page:
+Alternatively, download and extract a release archive from GitHub:
 ```bash
-wget https://github.com/upstatedatasystems-llc/oci-a1-launcher/archive/refs/tags/v1.1.0.tar.gz
-tar -xzf v1.1.0.tar.gz
-cd oci-a1-launcher-1.1.0
+wget https://github.com/upstatedatasystems-llc/oci-a1-launcher/archive/refs/tags/v1.2.0.tar.gz
+tar -xzf v1.2.0.tar.gz
+cd oci-a1-launcher-1.2.0
 sudo bash install.sh
 ```
 
@@ -133,9 +153,10 @@ sudo bash install.sh
    ```
    Populate `COMPARTMENT_OCID`, `CONTROL_INSTANCE_OCID`, `SMTP_USER`, `SMTP_APP_PASSWORD`, and the six `STACK_OCID_*` variables.
 
-2. **Validate Access & Configuration**:
+2. **Validate Access & Candidate Plan**:
    ```bash
    sudo oci-a1-launcherctl doctor
+   sudo oci-a1-launcherctl candidates
    sudo oci-a1-launcherctl test-email
    ```
 
@@ -163,6 +184,7 @@ The configuration file resides at `/etc/oci-a1-launcher/launcher.env`. Below is 
 | `STACK_OCID_AD3` | *(Required)* | Resource Manager Stack OCID for AD-3 (2 OCPU / 12 GB) |
 | `STACK_OCID_AD3E` | *(Required)* | Resource Manager Stack OCID for AD-3 (1 OCPU / 6 GB) |
 | `STACK_OCIDS` | *(Optional)* | JSON string mapping stack names to OCIDs (alternative to individual env vars) |
+| `EXTRA_SMALL_STACKS_JSON` | `[]` | Optional JSON array defining extra 1 OCPU / 6 GB stacks |
 | `LOCAL_TIMEZONE` | `America/New_York` | Timezone for reports and log entries |
 | `DATA_DIR` | `/var/lib/oci-a1-launcher` | Directory holding runtime state and logs |
 | `SMTP_HOST` | `smtp.gmail.com` | SMTP server host |
@@ -223,13 +245,17 @@ Set `DRY_RUN=false` when ready to enable live provisioning attempts.
 
 ---
 
-## Administration & Management Commands
+## Administration & Candidate Inspection Commands
 
-Use `oci-a1-launcherctl` for standard administrative tasks:
+Use `oci-a1-launcherctl` for standard administrative and diagnostic tasks:
 
 ```bash
 # Check OCI IAM permissions, compute access, and stack accessibility
 sudo oci-a1-launcherctl doctor
+
+# Inspect candidate stack selection, AD rotation, and consumed stacks (Read-Only)
+sudo oci-a1-launcherctl candidates
+sudo oci-a1-launcherctl plan
 
 # Send a test email to verify SMTP configuration
 sudo oci-a1-launcherctl test-email
@@ -270,21 +296,18 @@ To upgrade an existing deployment using `upgrade.sh`:
    ```bash
    sudo bash upgrade.sh
    ```
-   `upgrade.sh` safely creates a root-only backup under `/var/backups/oci-a1-launcher`, updates binaries and systemd definitions, preserves existing credentials in `/etc/oci-a1-launcher/launcher.env`, and appends placeholders for any newly required variables (`STACK_OCID_AD1` through `STACK_OCID_AD3E`).
+   `upgrade.sh` safely creates a root-only backup under `/var/backups/oci-a1-launcher`, updates binaries and systemd definitions, preserves existing credentials in `/etc/oci-a1-launcher/launcher.env`, and appends placeholders for any newly required variables (`STACK_OCID_AD1` through `STACK_OCID_AD3E` and `EXTRA_SMALL_STACKS_JSON='[]'`).
 
-3. **Populate Stack OCIDs (Migration Step for v1.1.0+)**:
-   If upgrading from a version where stack OCIDs were hardcoded in python source, edit `/etc/oci-a1-launcher/launcher.env`:
+3. **Inspect Candidate Plan**:
    ```bash
-   sudo nano /etc/oci-a1-launcher/launcher.env
+   sudo oci-a1-launcherctl candidates
    ```
-   Set your six Resource Manager stack OCIDs (`STACK_OCID_AD1` through `STACK_OCID_AD3E` or `STACK_OCIDS`).
 
 4. **Validate and Resume**:
    ```bash
    sudo oci-a1-launcherctl doctor
    sudo oci-a1-launcherctl resume
    ```
-   *(The launcher timer remains safely paused and disabled after upgrade until valid stack OCIDs are configured and `resume` is executed).*
 
 ---
 
