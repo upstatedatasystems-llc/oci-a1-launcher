@@ -487,6 +487,25 @@ def run_once() -> int:
             )
             return 0
 
+        unconfigured = [
+            stack.name
+            for stack in STACKS
+            if not stack.ocid
+            or "example" in stack.ocid.lower()
+            or "replace" in stack.ocid.lower()
+        ]
+        if unconfigured:
+            append_event(
+                {
+                    "event_type": "system_error",
+                    "run_id": run_id,
+                    "stage": "stack_configuration_validation",
+                    "message": f"Stack OCIDs are not configured for: {', '.join(unconfigured)}. "
+                    "Edit /etc/oci-a1-launcher/launcher.env and set STACK_OCID_AD1 through STACK_OCID_AD3E.",
+                }
+            )
+            return 1
+
         state = load_state()
         append_event({"event_type": "run_start", "run_id": run_id, "dry_run": DRY_RUN})
         try:
@@ -663,6 +682,18 @@ def run_once() -> int:
 
 
 def doctor(send_test: bool) -> int:
+    unconfigured = [
+        stack.name
+        for stack in STACKS
+        if not stack.ocid
+        or "example" in stack.ocid.lower()
+        or "replace" in stack.ocid.lower()
+    ]
+    if unconfigured:
+        print(f"ERROR: Stack OCIDs are not configured for: {', '.join(unconfigured)}")
+        print("Please edit /etc/oci-a1-launcher/launcher.env and set STACK_OCID_AD1 through STACK_OCID_AD3E.")
+        return 1
+
     print(f"Region: {REGION}")
     print(f"Compartment: {COMPARTMENT_OCID}")
     print(f"Control instance: {CONTROL_INSTANCE_NAME} ({CONTROL_INSTANCE_OCID})")
